@@ -1,0 +1,564 @@
+import SwiftUI
+import SwiftData
+import UniformTypeIdentifiers
+
+struct NewAuditSetupView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
+    let authViewModel: AuthViewModel
+    let auditViewModel: AuditViewModel
+    let onSessionCreated: (AuditSession) -> Void
+
+    @Query(sort: \Location.name) private var locations: [Location]
+    @Query private var allSKUs: [ProductSKU]
+    @Query private var allLayouts: [ShelfLayout]
+
+    @State private var selectedLocation: Location?
+    @State private var selectedMode: CaptureMode = .photo
+    @AppStorage("reviewWorkflowDefault") private var reviewLaterDefault: Bool = true
+    @AppStorage("defaultCaptureQualityMode") private var defaultCaptureQualityModeRaw: String = CaptureQualityMode.standard.rawValue
+    @State private var reviewLater: Bool = true
+    @State private var selectedLayout: ShelfLayout? = nil
+    @State private var captureQualityMode: CaptureQualityMode = .standard
+
+    @State private var showExpectedImporter = false
+    @State private var showOnHandImporter = false
+    @State private var showExpectedMapper = false
+    @State private var showOnHandMapper = false
+    @State private var pendingCSVForExpected: CSVParseResult?
+    @State private var pendingCSVForOnHand: CSVParseResult?
+    @State private var expectedDraft: CSVImportDraft?
+    @State private var onHandDraft: CSVImportDraft?
+    @State private var csvError: String?
+    @State private var showCSVError = false
+
+    private var skuInfos: [ParsedSKUInfo] {
+        allSKUs.map { ParsedSKUInfo(id: $0.id, sku: $0.sku, name: $0.name) }
+    }
+
+    private var layoutsForLocation: [ShelfLayout] {
+        guard let loc = selectedLocation else { return [] }
+        return allLayouts
+            .filter { $0.locationId == loc.id }
+            .sorted { $0.name < $1.name }
+    }
+
+    var body: some View {
+        List {
+            locationSection
+            captureModeSection
+            captureQualitySection
+            reviewWorkflowSection
+            layoutSection
+            importSection
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle("New Audit")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel") { dismiss() }
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Start") { startAudit() }
+                    .fontWeight(.semibold)
+                    .disabled(selectedLocation == nil)
+            }
+        }
+        .sensoryFeedback(.selection, trigger: selectedMode)
+        .onChange(of: selectedLocation) { _, _ in
+            selectedLayout = nil
+        }
+        .onAppear {
+            reviewLater = reviewLaterDefault
+            captureQualityMode = CaptureQualityMode(rawValue: defaultCaptureQualityModeRaw) ?? .standard
+        }
+        .fileImporter(
+            isPresented: $showExpectedImporter,
+            allowedContentTypes: [UTType.commaSeparatedText, UTType.plainText],
+            allowsMultipleSelection: false
+        ) { result in
+            handleFileImport(result: result, type: .expected)
+        }
+        .fileImporter(
+            isPresented: $showOnHandImporter,
+            allowedContentTypes: [UTType.commaSeparatedText, UTType.plainText],
+            allowsMultipleSelection: false
+        ) { result in
+            handleFileImport(result: result, type: .onHand)
+        }
+        .sheet(isPresented: $showExpectedMapper) {
+            if let parsed = pendingCSVForExpected {
+                CSVColumnMapperView(
+                    parseResult: parsed,
+                    skus: skuInfos,
+                    importType: .expected,
+                    onConfirm: { draft in
+                        expectedDraft = draft
+                        showExpectedMapper = false
+                    },
+                    onCancel: {
+                        pendingCSVForExpected = nil
+                        showExpectedMapper = false
+                    }
+                )
+            }
+        }
+        .sheet(isPresented: $showOnHandMapper) {
+            if let parsed = pendingCSVForOnHand {
+                CSVColumnMapperView(
+                    parseResult: parsed,
+                    skus: skuInfos,
+                    importType: .onHand,
+                    onConfirm: { draft in
+                        onHandDraft = draft
+                        showOnHandMapper = false
+                    },
+                    onCancel: {
+                        pendingCSVForOnHand = nil
+                        showOnHandMapper = false
+                    }
+                )
+            }
+        }
+        .alert("Import Error", isPresented: $showCSVError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(csvError ?? "Could not read the file.")
+        }
+    }
+
+    // MARK: - Sections
+
+    private var locationSection: some View {
+        Section {
+            if locations.isEmpty {
+                HStack(spacing: 12) {
+                    Image(systemName: "mappin.slash")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("No Locations")
+                            .font(.subheadline.weight(.medium))
+                        Text("Add a location before starting an audit")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 4)
+            } else {
+                Picker("Location", selection: $selectedLocation) {
+                    Text("Select…").tag(nil as Location?)
+                    ForEach(locations) { location in
+                        Text(location.name).tag(location as Location?)
+                    }
+                }
+            }
+        } header: {
+            Text("Location")
+        }
+    }
+
+    private var captureModeSection: some View {
+        Section {
+            ForEach(CaptureMode.allCases, id: \.self) { mode in
+                Button {
+                    selectedMode = mode
+                } label: {
+                    HStack(spacing: 14) {
+                        Image(systemName: mode.icon)
+                            .font(.title3.weight(.medium))
+                            .foregroundStyle(selectedMode == mode ? .white : .blue)
+                            .frame(width: 40, height: 40)
+                            .background(selectedMode == mode ? Color.blue : Color.blue.opacity(0.12))
+                            .clipShape(.rect(cornerRadius: 10))
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(mode.displayName)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Text(mode.description)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+
+                        if selectedMode == mode {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.blue)
+                                .font(.title3)
+                        }
+                    }
+                }
+            }
+        } header: {
+            Text("Capture Mode")
+        }
+    }
+
+    private var captureQualitySection: some View {
+        Section {
+            ForEach(CaptureQualityMode.allCases, id: \.self) { mode in
+                Button {
+                    captureQualityMode = mode
+                } label: {
+                    HStack(spacing: 14) {
+                        Image(systemName: mode.icon)
+                            .font(.title3.weight(.medium))
+                            .foregroundStyle(captureQualityMode == mode ? .white : .teal)
+                            .frame(width: 40, height: 40)
+                            .background(captureQualityMode == mode ? Color.teal : Color.teal.opacity(0.12))
+                            .clipShape(.rect(cornerRadius: 10))
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(mode.displayName)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Text(mode.description)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+
+                        if captureQualityMode == mode {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.teal)
+                                .font(.title3)
+                        }
+                    }
+                }
+            }
+
+            if captureQualityMode == .highAccuracy {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(CaptureGuidanceTip.highAccuracyTips) { tip in
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: tip.icon)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.teal)
+                                .frame(width: 18, height: 18)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(tip.title)
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(.primary)
+                                Text(tip.subtitle)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                .padding(.top, 8)
+            }
+        } header: {
+            Text("Capture Quality Mode")
+        } footer: {
+            Text(captureQualityMode == .highAccuracy ? "Use this when auditing loose products on a plain surface for cleaner spacing and more reliable detections." : "Standard mode works best for typical shelf captures and faster audit setup.")
+                .font(.caption2)
+        }
+    }
+
+    private var reviewWorkflowSection: some View {
+        Section {
+            ForEach(ReviewWorkflow.allCases, id: \.self) { workflow in
+                Button {
+                    reviewLater = (workflow == .reviewLater)
+                } label: {
+                    HStack(spacing: 14) {
+                        Image(systemName: workflow.icon)
+                            .font(.title3.weight(.medium))
+                            .foregroundStyle(selectedWorkflow == workflow ? .white : .indigo)
+                            .frame(width: 40, height: 40)
+                            .background(selectedWorkflow == workflow ? Color.indigo : Color.indigo.opacity(0.12))
+                            .clipShape(.rect(cornerRadius: 10))
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(workflow.displayName)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Text(workflow.description)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+
+                        if selectedWorkflow == workflow {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.indigo)
+                                .font(.title3)
+                        }
+                    }
+                }
+            }
+        } header: {
+            Text("Review Workflow")
+        } footer: {
+            Text("Review Later is recommended for large audits.")
+                .font(.caption2)
+        }
+    }
+
+    @ViewBuilder
+    private var layoutSection: some View {
+        Section {
+            if selectedLocation == nil {
+                HStack(spacing: 12) {
+                    Image(systemName: "rectangle.split.3x1")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28)
+                    Text("Select a location first")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            } else if layoutsForLocation.isEmpty {
+                HStack(spacing: 12) {
+                    Image(systemName: "rectangle.split.3x1")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("No layouts at this location")
+                            .font(.subheadline)
+                        Text("Add shelf layouts in the Locations section")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } else {
+                layoutPickerRow
+            }
+        } header: {
+            Text("Shelf Layout (Optional)")
+        } footer: {
+            if selectedLayout != nil {
+                Text("Classification will be limited to each zone's assigned SKU, speeding up audits on organized shelves.")
+                    .font(.caption2)
+            } else {
+                Text("Choose a layout to restrict each region to its zone's assigned SKU.")
+                    .font(.caption2)
+            }
+        }
+    }
+
+    private var layoutPickerRow: some View {
+        HStack(spacing: 12) {
+            Image(systemName: selectedLayout != nil ? "checkmark.circle.fill" : "rectangle.split.3x1")
+                .font(.body)
+                .foregroundStyle(selectedLayout != nil ? .green : .blue)
+                .frame(width: 28)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Shelf Layout")
+                    .font(.subheadline)
+                if let layout = selectedLayout {
+                    Text("\(layout.name) · \(layout.zones.count) zones · \(layout.assignedZoneCount) assigned")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                } else {
+                    Text("None selected")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+
+            Menu {
+                Button {
+                    selectedLayout = nil
+                } label: {
+                    Label("None", systemImage: "xmark.circle")
+                }
+                Divider()
+                ForEach(layoutsForLocation) { layout in
+                    Button {
+                        selectedLayout = layout
+                    } label: {
+                        HStack {
+                            Text(layout.name)
+                            if selectedLayout?.id == layout.id {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Text(selectedLayout == nil ? "Select" : "Change")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.blue)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.blue.opacity(0.12), in: Capsule())
+            }
+            .buttonStyle(.plain)
+
+            if selectedLayout != nil {
+                Button {
+                    selectedLayout = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                        .font(.body)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var importSection: some View {
+        Section {
+            importRow(
+                title: "Expected Counts",
+                subtitle: expectedDraft.map { "\($0.filename) · \($0.matchedCount) matched" } ?? "Import CSV to guide classification",
+                icon: "doc.text.magnifyingglass",
+                color: .blue,
+                draft: expectedDraft,
+                importAction: { showExpectedImporter = true },
+                removeAction: { expectedDraft = nil }
+            )
+
+            importRow(
+                title: "Inventory On Hand",
+                subtitle: onHandDraft.map { "\($0.filename) · \($0.matchedCount) matched" } ?? "Optional: import for reconciliation",
+                icon: "cube.box.fill",
+                color: .teal,
+                draft: onHandDraft,
+                importAction: { showOnHandImporter = true },
+                removeAction: { onHandDraft = nil }
+            )
+        } header: {
+            Text("Expected Data (Optional)")
+        } footer: {
+            Text("Importing expected counts focuses classification on known SKUs and speeds up audits.")
+                .font(.caption2)
+        }
+    }
+
+    private func importRow(
+        title: String,
+        subtitle: String,
+        icon: String,
+        color: Color,
+        draft: CSVImportDraft?,
+        importAction: @escaping () -> Void,
+        removeAction: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: draft != nil ? "checkmark.circle.fill" : icon)
+                .font(.body)
+                .foregroundStyle(draft != nil ? .green : color)
+                .frame(width: 28)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            if draft != nil {
+                Button {
+                    removeAction()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                        .font(.body)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Button {
+                    importAction()
+                } label: {
+                    Text("Import")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(color)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(color.opacity(0.12), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    // MARK: - Logic
+
+    private var selectedWorkflow: ReviewWorkflow {
+        reviewLater ? .reviewLater : .reviewAsYouGo
+    }
+
+    private func handleFileImport(result: Result<[URL], Error>, type: CSVImportType) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            guard url.startAccessingSecurityScopedResource() else {
+                csvError = "Permission denied to access this file."
+                showCSVError = true
+                return
+            }
+            defer { url.stopAccessingSecurityScopedResource() }
+            do {
+                let text = try String(contentsOf: url, encoding: .utf8)
+                let parsed = CSVImportService.shared.parse(text: text, filename: url.lastPathComponent)
+                guard !parsed.headers.isEmpty else {
+                    csvError = "The file appears empty or is not a valid CSV."
+                    showCSVError = true
+                    return
+                }
+                switch type {
+                case .expected:
+                    pendingCSVForExpected = parsed
+                    showExpectedMapper = true
+                case .onHand:
+                    pendingCSVForOnHand = parsed
+                    showOnHandMapper = true
+                }
+            } catch {
+                csvError = "Could not read file: \(error.localizedDescription)"
+                showCSVError = true
+            }
+        case .failure(let error):
+            csvError = error.localizedDescription
+            showCSVError = true
+        }
+    }
+
+    private func startAudit() {
+        guard let location = selectedLocation,
+              let user = authViewModel.currentUser else { return }
+
+        auditViewModel.setup(context: modelContext)
+
+        guard let session = auditViewModel.createSession(
+            locationId: location.id,
+            locationName: location.name,
+            userId: user.id,
+            userName: user.name,
+            mode: selectedMode,
+            reviewWorkflow: selectedWorkflow,
+            captureQualityMode: captureQualityMode,
+            selectedLayoutId: selectedLayout?.id,
+            selectedLayoutName: selectedLayout?.name ?? ""
+        ) else { return }
+
+        if let draft = expectedDraft {
+            auditViewModel.attachExpectedSnapshot(to: session, draft: draft, skuInfos: skuInfos)
+        }
+        if let draft = onHandDraft {
+            auditViewModel.attachOnHandSnapshot(to: session, draft: draft, skuInfos: skuInfos)
+        }
+
+        onSessionCreated(session)
+    }
+}
