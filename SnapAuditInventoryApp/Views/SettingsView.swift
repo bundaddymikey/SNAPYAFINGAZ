@@ -559,6 +559,15 @@ struct SettingsView: View {
         }
     }
 
+    private var speechRateLabel: String {
+        switch ttsSpeechRate {
+        case ..<0.36: "Slow"
+        case 0.36..<0.46: "Normal"
+        case 0.46..<0.54: "Medium"
+        default: "Fast"
+        }
+    }
+
     private func confidenceSlider(
         title: String,
         subtitle: String,
@@ -624,12 +633,4 @@ struct PrivacyView: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    private var speechRateLabel: String {
-        switch ttsSpeechRate {
-        case ..<0.36: "Slow"
-        case 0.36..<0.46: "Normal"
-        case 0.46..<0.54: "Medium"
-        default: "Fast"
-        }
-    }
 }
