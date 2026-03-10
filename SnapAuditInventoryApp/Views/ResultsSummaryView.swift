@@ -348,6 +348,7 @@ struct ResultsSummaryView: View {
         case .mismatchExpected: .red
         case .mismatchOnHand: .purple
         case .lowConfidence: .red
+        case .outsideSelectedBrand: .gray
         }
     }
 
