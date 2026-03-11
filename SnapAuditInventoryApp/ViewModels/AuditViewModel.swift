@@ -490,8 +490,8 @@ class AuditViewModel {
                                     candidate2Score: secondCandidate.score,
                                     groupId: groupId,
                                     differentiatorZones: differentiatorZones,
-                                    skuKeywords: skuKeywords,
-                                    embeddings: allEmbeddings,
+                                    skuKeywords: skuKeywordsMap,
+                                    embeddings: embeddingRecords,
                                     verifiedSamples: [],
                                     ocrAssistedEnabled: ocrAssisted
                                 )
