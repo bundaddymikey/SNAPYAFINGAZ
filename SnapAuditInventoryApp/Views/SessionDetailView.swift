@@ -420,6 +420,7 @@ struct SessionDetailView: View {
         case .draft: .gray
         case .paused: .orange
         case .processing: .blue
+        case .reviewRequired: .orange
         case .complete: .green
         }
     }

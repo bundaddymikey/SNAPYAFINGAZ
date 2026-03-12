@@ -18,11 +18,11 @@ struct DebugLogView: View {
             Section {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        FilterChip(label: "All", isSelected: selectedCategory == nil) {
+                        DebugFilterChip(label: "All", isSelected: selectedCategory == nil) {
                             selectedCategory = nil
                         }
                         ForEach(AuditLogger.LogEntry.Category.allCases, id: \.rawValue) { cat in
-                            FilterChip(
+                            DebugFilterChip(
                                 label: cat.rawValue,
                                 icon: cat.icon,
                                 isSelected: selectedCategory == cat
@@ -86,7 +86,7 @@ struct DebugLogView: View {
     }
 }
 
-private struct FilterChip: View {
+private struct DebugFilterChip: View {
     let label: String
     var icon: String? = nil
     let isSelected: Bool

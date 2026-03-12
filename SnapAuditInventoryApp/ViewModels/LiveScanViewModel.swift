@@ -70,9 +70,19 @@ final class LiveScanViewModel {
     }
 
     private func loadCatalogData(context: ModelContext) {
-        // Load embeddings
-        let embDescriptor = FetchDescriptor<EmbeddingRecord>()
-        embeddingRecords = (try? context.fetch(embDescriptor)) ?? []
+        // Load embeddings (fetch Embedding model, convert to EmbeddingRecord structs)
+        let embDescriptor = FetchDescriptor<Embedding>()
+        let embeddings = (try? context.fetch(embDescriptor)) ?? []
+        embeddingRecords = embeddings.compactMap { emb -> EmbeddingRecord? in
+            guard let url = emb.sourceMedia?.fileURL else { return nil }
+            return EmbeddingRecord(
+                embeddingId: emb.id,
+                skuId: emb.skuId,
+                vectorData: emb.vectorData,
+                qualityScore: emb.qualityScore,
+                sourceMediaURL: url
+            )
+        }
 
         // Load active SKUs
         let skuDescriptor = FetchDescriptor<ProductSKU>()
