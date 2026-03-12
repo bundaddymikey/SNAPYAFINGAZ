@@ -6,12 +6,14 @@ enum CaptureInputMode: String, CaseIterable {
     case photo = "Photo"
     case video = "Video"
     case barcode = "Barcode"
+    case voice = "Voice"
 
     var icon: String {
         switch self {
         case .photo: "camera.fill"
         case .video: "video.fill"
         case .barcode: "barcode.viewfinder"
+        case .voice: "mic.fill"
         }
     }
 }
@@ -46,6 +48,8 @@ struct CaptureView: View {
     @State private var showImagePreview: Bool = false
     @State private var captureQualityAssessment: CaptureQualityAssessment = .empty
     @State private var captureInputMode: CaptureInputMode = .photo
+    @State private var voiceInputService = VoiceInputService.shared
+    @State private var voiceMatchBanner: String? = nil
 
     @Query private var allSKUs: [ProductSKU]
     @Query private var allGroups: [LookAlikeGroup]
@@ -109,6 +113,11 @@ struct CaptureView: View {
                         session: session,
                         auditViewModel: auditViewModel
                     )
+                    inputModeSwitcher
+                }
+            } else if captureInputMode == .voice {
+                VStack(spacing: 0) {
+                    voiceInputOverlay
                     inputModeSwitcher
                 }
             } else if useLibraryMode {
@@ -692,6 +701,8 @@ struct CaptureView: View {
                 videoControls
             case .hybrid:
                 hybridControls
+            case .realTimeScan:
+                EmptyView() // Handled by LiveScanView
             }
         }
         .padding(.horizontal, 24)
@@ -718,7 +729,7 @@ struct CaptureView: View {
                     .padding(.vertical, 10)
                     .background(
                         captureInputMode == mode
-                            ? (mode == .barcode ? Color.cyan : Color.blue)
+                            ? (mode == .barcode ? Color.cyan : (mode == .voice ? Color.purple : Color.blue))
                             : Color.clear,
                         in: Capsule()
                     )
@@ -730,6 +741,142 @@ struct CaptureView: View {
         .padding(.horizontal, 40)
         .padding(.vertical, 10)
         .background(.black)
+    }
+
+    private var voiceInputOverlay: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            VStack(spacing: 24) {
+                Spacer()
+
+                // Status indicator
+                HStack(spacing: 8) {
+                    Image(systemName: "mic.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(voiceInputService.isListening ? .purple : .gray)
+                    Text("Voice Fallback")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Spacer()
+                    if voiceInputService.isListening {
+                        HStack(spacing: 4) {
+                            Circle().fill(.purple).frame(width: 6, height: 6)
+                                .opacity(voiceInputService.isListening ? 1 : 0.3)
+                            Text("Listening…")
+                                .font(.caption2)
+                                .foregroundStyle(.purple)
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+
+                Spacer()
+
+                // Transcription display
+                if !voiceInputService.transcribedText.isEmpty {
+                    VStack(spacing: 8) {
+                        Text(voiceInputService.transcribedText)
+                            .font(.title3.weight(.medium))
+                            .foregroundStyle(.white)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+
+                        if let matched = voiceInputService.matchedProduct {
+                            HStack(spacing: 8) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                                Text(matched.name)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.green)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(.green.opacity(0.15), in: Capsule())
+                        }
+                    }
+                    .transition(.opacity)
+                } else if voiceInputService.isListening {
+                    Text("Say a product name…")
+                        .font(.subheadline)
+                        .foregroundStyle(.gray)
+                }
+
+                // Match banner
+                if let banner = voiceMatchBanner {
+                    Label(banner, systemImage: "checkmark.circle.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(.green, in: Capsule())
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+
+                Spacer()
+
+                // Mic button
+                Button {
+                    if voiceInputService.isListening {
+                        voiceInputService.stopListening()
+                    } else {
+                        startVoiceListening()
+                    }
+                } label: {
+                    ZStack {
+                        Circle()
+                            .fill(voiceInputService.isListening ? Color.purple : Color.purple.opacity(0.3))
+                            .frame(width: 80, height: 80)
+                            .scaleEffect(voiceInputService.isListening ? 1.1 : 1.0)
+                            .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true),
+                                       value: voiceInputService.isListening)
+                        Image(systemName: voiceInputService.isListening ? "mic.slash.fill" : "mic.fill")
+                            .font(.title)
+                            .foregroundStyle(.white)
+                    }
+                }
+                .padding(.bottom, 12)
+
+                // Error display
+                if let error = voiceInputService.error {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .padding(.horizontal, 24)
+                        .multilineTextAlignment(.center)
+                }
+
+                Spacer(minLength: 8)
+            }
+            .animation(.spring(response: 0.35), value: voiceInputService.transcribedText)
+            .animation(.spring(response: 0.35), value: voiceMatchBanner)
+        }
+        .onAppear {
+            voiceInputService.requestAuthorization()
+        }
+    }
+
+    private func startVoiceListening() {
+        voiceInputService.startListening(
+            catalog: allSKUs,
+            onMatch: { product in
+                // Add matched product as a manual line item
+                TTSService.shared.speak("Matched: \(product.name)")
+                withAnimation { voiceMatchBanner = "Added: \(product.name)" }
+                Task {
+                    try? await Task.sleep(for: .seconds(2.5))
+                    await MainActor.run { withAnimation { voiceMatchBanner = nil } }
+                }
+            },
+            onRawText: { text in
+                // Show the raw text — user can try again
+                withAnimation { voiceMatchBanner = "No match for: \(text)" }
+                Task {
+                    try? await Task.sleep(for: .seconds(2.5))
+                    await MainActor.run { withAnimation { voiceMatchBanner = nil } }
+                }
+            }
+        )
     }
 
     private var photoControls: some View {

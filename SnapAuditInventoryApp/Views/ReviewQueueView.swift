@@ -9,6 +9,9 @@ struct ReviewQueueView: View {
     @State private var applyToSimilar = false
     @State private var dragOffset: CGSize = .zero
     @State private var initialPendingCount: Int = 0
+    @State private var showCreateProduct = false
+    @State private var createProductEvidence: DetectionEvidence? = nil
+    @State private var catalogVM = CatalogViewModel()
 
     private var pendingEvidence: [DetectionEvidence] {
         session.lineItems
@@ -77,6 +80,10 @@ struct ReviewQueueView: View {
                 if initialPendingCount == 0 {
                     initialPendingCount = pendingEvidence.count
                 }
+                catalogVM.setup(context: modelContext)
+            }
+            .sheet(isPresented: $showCreateProduct) {
+                ProductFormView(viewModel: catalogVM)
             }
         }
     }
@@ -358,6 +365,10 @@ struct ReviewQueueView: View {
                 Text("\(String(format: "%.0f", evidence.scaleLevel * 100))% scale")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
+
+                Spacer()
+
+                ConfidenceBadge(score: evidence.finalScore, reviewStatus: evidence.reviewStatus)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
@@ -445,6 +456,32 @@ struct ReviewQueueView: View {
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 8)
                 }
+
+                // Create New Product from this detection
+                Button {
+                    createProductEvidence = evidence
+                    showCreateProduct = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "plus.circle.fill")
+                            .foregroundStyle(.green)
+                        Text("Create New Product")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color.green.opacity(0.07), in: .rect(cornerRadius: 10))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10)
+                            .strokeBorder(.green.opacity(0.2), lineWidth: 1)
+                    }
+                }
+                .buttonStyle(.plain)
             }
         }
     }

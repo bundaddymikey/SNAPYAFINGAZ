@@ -24,6 +24,7 @@ struct TrainingMediaView: View {
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
     @State private var selectedVideoItem: PhotosPickerItem?
     @State private var mediaToDelete: ReferenceMedia?
+    @State private var showCameraPicker = false
 
     private let columns = [
         GridItem(.flexible(), spacing: 8),
@@ -99,6 +100,17 @@ struct TrainingMediaView: View {
             }
             Button("Cancel", role: .cancel) { mediaToDelete = nil }
         }
+        .fullScreenCover(isPresented: $showCameraPicker) {
+            CameraCapturePicker { image in
+                showCameraPicker = false
+                guard let data = image.jpegData(compressionQuality: 0.85) else { return }
+                Task {
+                    await trainingVM.addPhotos(dataItems: [data])
+                }
+            } onCancel: {
+                showCameraPicker = false
+            }
+        }
     }
 
     private var healthBadge: some View {
@@ -159,19 +171,33 @@ struct TrainingMediaView: View {
     }
 
     private var addButtons: some View {
-        HStack(spacing: 12) {
-            PhotosPicker(
-                selection: $selectedPhotoItems,
-                maxSelectionCount: 20,
-                matching: .images
-            ) {
-                Label("Add Photos", systemImage: "photo.badge.plus")
-                    .font(.subheadline.weight(.medium))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Color(.secondarySystemFill))
-                    .clipShape(.rect(cornerRadius: 10))
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
+                PhotosPicker(
+                    selection: $selectedPhotoItems,
+                    maxSelectionCount: 20,
+                    matching: .images
+                ) {
+                    Label("Library", systemImage: "photo.badge.plus")
+                        .font(.subheadline.weight(.medium))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Color(.secondarySystemFill))
+                        .clipShape(.rect(cornerRadius: 10))
+                }
+
+                Button {
+                    showCameraPicker = true
+                } label: {
+                    Label("Camera", systemImage: "camera.fill")
+                        .font(.subheadline.weight(.medium))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Color(.secondarySystemFill))
+                        .clipShape(.rect(cornerRadius: 10))
+                }
             }
+            .buttonStyle(.plain)
 
             PhotosPicker(
                 selection: $selectedVideoItem,
@@ -184,8 +210,55 @@ struct TrainingMediaView: View {
                     .background(Color(.secondarySystemFill))
                     .clipShape(.rect(cornerRadius: 10))
             }
+            .buttonStyle(.plain)
+
+            Text("Capture front, back, side, label & barcode angles for best training results.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
         }
-        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Camera Capture Picker
+
+struct CameraCapturePicker: UIViewControllerRepresentable {
+    let onCapture: (UIImage) -> Void
+    let onCancel: () -> Void
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onCapture: onCapture, onCancel: onCancel)
+    }
+
+    class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let onCapture: (UIImage) -> Void
+        let onCancel: () -> Void
+
+        init(onCapture: @escaping (UIImage) -> Void, onCancel: @escaping () -> Void) {
+            self.onCapture = onCapture
+            self.onCancel = onCancel
+        }
+
+        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            if let image = info[.originalImage] as? UIImage {
+                onCapture(image)
+            } else {
+                onCancel()
+            }
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            onCancel()
+        }
     }
 }
 

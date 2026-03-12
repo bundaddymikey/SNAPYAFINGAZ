@@ -32,6 +32,8 @@ struct SettingsView: View {
     @State private var showDemoAlert = false
     @State private var showClearAlert = false
     @State private var pendingDemoState = false
+    @State private var showSampleDataAlert = false
+    @State private var sampleDataMessage = ""
 
     var body: some View {
         List {
@@ -512,6 +514,63 @@ struct SettingsView: View {
                         }
                     }
                 }
+
+                Button {
+                    let count = SampleDataService.loadSampleProducts(context: modelContext)
+                    if count > 0 {
+                        sampleDataMessage = "Loaded \(count) sample products"
+                        showSampleDataAlert = true
+                    } else {
+                        sampleDataMessage = "Sample products already loaded"
+                        showSampleDataAlert = true
+                    }
+                } label: {
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Load Sample Products")
+                            Text("Add 10 test products for recognition testing")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: "tray.and.arrow.down.fill")
+                            .foregroundStyle(.green)
+                    }
+                }
+
+                Button(role: .destructive) {
+                    SampleDataService.removeSampleProducts(context: modelContext)
+                    sampleDataMessage = "Sample products removed"
+                    showSampleDataAlert = true
+                } label: {
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Remove Sample Products")
+                            Text("Delete all products tagged 'sample'")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: "tray.and.arrow.up.fill")
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                NavigationLink {
+                    DebugLogView()
+                } label: {
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Debug Log")
+                            Text("View recognition events and review decisions")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: "ant.fill")
+                            .foregroundStyle(.gray)
+                    }
+                }
             }
 
             Section("About") {
@@ -556,6 +615,11 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will remove ALL data including any custom entries you've added. You'll need to set up a new admin account.")
+        }
+        .alert("Sample Data", isPresented: $showSampleDataAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(sampleDataMessage)
         }
     }
 

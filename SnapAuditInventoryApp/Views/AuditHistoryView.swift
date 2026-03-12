@@ -175,6 +175,7 @@ struct AuditHistoryView: View {
         case .draft: .gray
         case .paused: .orange
         case .processing: .blue
+        case .reviewRequired: .yellow
         case .complete: .green
         }
     }

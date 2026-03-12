@@ -6,6 +6,7 @@ import SwiftData
 class CatalogViewModel {
     var products: [ProductSKU] = []
     var searchText = ""
+    var saveError: String? = nil
 
     // Parent category filter ("All" = no filter)
     var selectedParentCategory = "All"
@@ -111,7 +112,17 @@ class CatalogViewModel {
         isActive: Bool = true
     ) {
         guard let modelContext else { return }
+        saveError = nil
+
         if let existing {
+            // When editing, check if another product already uses this SKU
+            let trimmedSku = sku.trimmingCharacters(in: .whitespaces)
+            if existing.sku != trimmedSku {
+                if products.contains(where: { $0.id != existing.id && $0.sku == trimmedSku }) {
+                    saveError = "A product with SKU \"\(trimmedSku)\" already exists."
+                    return
+                }
+            }
             existing.sku = sku
             existing.productName = productName
             existing.brand = brand
@@ -125,6 +136,12 @@ class CatalogViewModel {
             existing.isActive = isActive
             existing.updatedAt = Date()
         } else {
+            // Prevent duplicate SKU on creation
+            let trimmedSku = sku.trimmingCharacters(in: .whitespaces)
+            if products.contains(where: { $0.sku == trimmedSku }) {
+                saveError = "A product with SKU \"\(trimmedSku)\" already exists."
+                return
+            }
             let product = ProductSKU(
                 sku: sku,
                 productName: productName,

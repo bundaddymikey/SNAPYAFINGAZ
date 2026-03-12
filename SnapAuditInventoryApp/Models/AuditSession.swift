@@ -5,12 +5,14 @@ nonisolated enum CaptureMode: String, Codable, CaseIterable, Sendable {
     case photo
     case video
     case hybrid
+    case realTimeScan
 
     var displayName: String {
         switch self {
         case .photo: "Photo Burst"
         case .video: "Video Sift"
         case .hybrid: "Hybrid"
+        case .realTimeScan: "Real-Time Scan"
         }
     }
 
@@ -19,6 +21,7 @@ nonisolated enum CaptureMode: String, Codable, CaseIterable, Sendable {
         case .photo: "camera.fill"
         case .video: "video.fill"
         case .hybrid: "camera.on.rectangle.fill"
+        case .realTimeScan: "livephoto.play"
         }
     }
 
@@ -27,6 +30,7 @@ nonisolated enum CaptureMode: String, Codable, CaseIterable, Sendable {
         case .photo: "Capture 1–8 photos from multiple angles"
         case .video: "Record 5–20s video, auto-sample frames"
         case .hybrid: "1 photo + optional short video clip"
+        case .realTimeScan: "Live camera feed with continuous recognition"
         }
     }
 }
@@ -35,6 +39,7 @@ nonisolated enum AuditStatus: String, Codable, CaseIterable, Sendable {
     case draft
     case paused
     case processing
+    case reviewRequired
     case complete
 
     var displayName: String {
@@ -42,6 +47,7 @@ nonisolated enum AuditStatus: String, Codable, CaseIterable, Sendable {
         case .draft: "Draft"
         case .paused: "Paused"
         case .processing: "Processing"
+        case .reviewRequired: "Review Required"
         case .complete: "Complete"
         }
     }
@@ -51,6 +57,7 @@ nonisolated enum AuditStatus: String, Codable, CaseIterable, Sendable {
         case .draft: "doc"
         case .paused: "pause.circle.fill"
         case .processing: "arrow.triangle.2.circlepath"
+        case .reviewRequired: "eye.circle.fill"
         case .complete: "checkmark.circle.fill"
         }
     }
@@ -60,6 +67,7 @@ nonisolated enum AuditStatus: String, Codable, CaseIterable, Sendable {
         case .draft: "gray"
         case .paused: "orange"
         case .processing: "blue"
+        case .reviewRequired: "purple"
         case .complete: "green"
         }
     }

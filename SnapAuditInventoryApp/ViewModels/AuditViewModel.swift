@@ -60,7 +60,22 @@ class AuditViewModel {
 
     func setup(context: ModelContext) {
         self.modelContext = context
+        recoverStuckSessions(context: context)
         fetchSessions()
+    }
+
+    /// Detect sessions stuck in `.processing` (e.g. app killed mid-process) and reset them to `.draft`.
+    private func recoverStuckSessions(context: ModelContext) {
+        let descriptor = FetchDescriptor<AuditSession>()
+        guard let allSessions = try? context.fetch(descriptor) else { return }
+        var didRecover = false
+        for session in allSessions where session.status == .processing {
+            session.status = .draft
+            didRecover = true
+        }
+        if didRecover {
+            try? context.save()
+        }
     }
 
     func fetchSessions() {
@@ -203,6 +218,7 @@ class AuditViewModel {
         isProcessing = true
         processingProgress = 0
         processingStatus = "Preparing…"
+        AuditLogger.shared.logSession("Processing session \(session.id.uuidString.prefix(8)) at \(session.locationName)")
 
         session.status = .processing
         try? modelContext.save()
@@ -492,7 +508,10 @@ class AuditViewModel {
                                     differentiatorZones: differentiatorZones,
                                     skuKeywords: skuKeywordsMap,
                                     embeddings: embeddingRecords,
-                                    verifiedSamples: [],
+                                    verifiedSamples: ContrastiveTrainingService.shared.fetchVerifiedSampleRecords(
+                                        for: effectiveCandidateIds,
+                                        modelContext: modelContext
+                                    ),
                                     ocrAssistedEnabled: ocrAssisted
                                 )
 
@@ -633,12 +652,41 @@ class AuditViewModel {
             }
         }
 
-        session.status = .complete
+        // Set status based on whether there are pending review items
+        let hasPendingReview = session.lineItems.contains { item in
+            item.evidence.contains { $0.reviewStatus == .pending }
+        }
+        session.status = hasPendingReview ? .reviewRequired : .complete
         try? modelContext.save()
         processingProgress = 1.0
-        processingStatus = "Complete"
+        processingStatus = hasPendingReview ? "Review Required" : "Complete"
         isProcessing = false
+
+        let totalEvidence = session.lineItems.flatMap(\.evidence).count
+        let pendingCount = session.lineItems.flatMap(\.evidence).filter { $0.reviewStatus == .pending }.count
+        AuditLogger.shared.logSession("Session complete: \(totalEvidence) detections, \(pendingCount) pending review")
+
         fetchSessions()
+    }
+
+    // MARK: - Finalize Guard
+
+    /// Returns true only when all evidence in the session has been reviewed (none pending).
+    func canFinalizeSession(_ session: AuditSession) -> Bool {
+        !session.lineItems.contains { item in
+            item.evidence.contains { $0.reviewStatus == .pending }
+        }
+    }
+
+    /// Finalize the session — transitions from .reviewRequired to .complete.
+    /// Only succeeds if the review queue is fully resolved.
+    func finalizeSession(_ session: AuditSession) -> Bool {
+        guard let modelContext else { return false }
+        guard canFinalizeSession(session) else { return false }
+        session.status = .complete
+        try? modelContext.save()
+        fetchSessions()
+        return true
     }
 
     // MARK: - Review Actions
@@ -649,6 +697,20 @@ class AuditViewModel {
         evidence.isSoftAssigned = false
         recomputeLineItem(evidence.lineItem, modelContext: modelContext)
         try? modelContext.save()
+
+        AuditLogger.shared.logReview(action: "Confirmed", skuName: evidence.chosenSkuName, evidenceId: evidence.id)
+
+        // Save as verified sample for the learning loop
+        saveAsVerifiedSample(evidence, modelContext: modelContext)
+
+        // Check if session can now be finalized automatically
+        if let session = evidence.lineItem?.session, session.status == .reviewRequired {
+            if canFinalizeSession(session) {
+                session.status = .complete
+                try? modelContext.save()
+                fetchSessions()
+            }
+        }
     }
 
     func rejectEvidence(_ evidence: DetectionEvidence) {
@@ -656,6 +718,7 @@ class AuditViewModel {
         evidence.reviewStatus = .rejected
         recomputeLineItem(evidence.lineItem, modelContext: modelContext)
         try? modelContext.save()
+        AuditLogger.shared.logReview(action: "Rejected", skuName: evidence.chosenSkuName, evidenceId: evidence.id)
     }
 
     func reassignEvidence(_ evidence: DetectionEvidence, toSkuId: UUID, skuName: String) {
@@ -778,6 +841,40 @@ class AuditViewModel {
         session.capturedMedia.reduce(0) { $0 + $1.sampledFrames.count }
     }
 
+    // MARK: - Verified Sample Learning
+
+    /// Saves a confirmed detection's crop image + embedding as a VerifiedSample
+    /// so the contrastive training pipeline can learn from user confirmations.
+    private func saveAsVerifiedSample(_ evidence: DetectionEvidence, modelContext: ModelContext) {
+        guard let skuId = evidence.chosenSkuId,
+              evidence.reviewStatus == .confirmed,
+              !evidence.cropURL.isEmpty else { return }
+
+        // Check we don't already have a verified sample for this evidence crop
+        let descriptor = FetchDescriptor<VerifiedSample>()
+        let existing = (try? modelContext.fetch(descriptor)) ?? []
+        if existing.contains(where: { $0.cropURL == evidence.cropURL && $0.skuId == skuId }) {
+            return
+        }
+
+        // Load the crop image and compute its embedding
+        guard let cropImage = MediaStorageService.shared.loadImage(at: evidence.cropURL) else { return }
+
+        Task {
+            guard let (vector, _) = try? await EmbeddingService.shared.computeEmbedding(for: cropImage) else { return }
+
+            await MainActor.run {
+                let sample = VerifiedSample(
+                    skuId: skuId,
+                    cropURL: evidence.cropURL,
+                    vectorData: vector,
+                    metadataJSON: "{\"source\":\"review_confirmation\",\"finalScore\":\(evidence.finalScore)}"
+                )
+                modelContext.insert(sample)
+                try? modelContext.save()
+            }
+        }
+    }
 
     // MARK: - Private Helpers
 

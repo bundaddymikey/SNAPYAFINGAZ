@@ -402,8 +402,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "SnapAudit uses the camera to capture inventory items.";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "SnapAudit uses the microphone for video capture.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "SnapAudit uses the microphone for video capture and voice input.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "SnapAudit saves audit media when you choose to export.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "SnapAudit uses speech recognition for voice fallback during inventory capture.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -438,8 +439,9 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "SnapAudit uses the camera to capture inventory items.";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "SnapAudit uses the microphone for video capture.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "SnapAudit uses the microphone for video capture and voice input.";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "SnapAudit saves audit media when you choose to export.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "SnapAudit uses speech recognition for voice fallback during inventory capture.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

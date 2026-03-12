@@ -89,6 +89,18 @@ struct DashboardView: View {
                         }
                     }
 
+                    if authViewModel.isAdmin {
+                        NavigationLink(value: AppRoute.debugLog) {
+                            DashboardCard(
+                                title: "Debug Log",
+                                subtitle: "Recognition events",
+                                icon: "ant.fill",
+                                color: .gray
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+
                     NavigationLink(value: AppRoute.settings) {
                         HStack(spacing: 12) {
                             Image(systemName: "gearshape.fill")
@@ -148,6 +160,8 @@ struct DashboardView: View {
                     )
                 case .lookAlikeGroups:
                     LookAlikeGroupsView()
+                case .debugLog:
+                    DebugLogView()
                 }
             }
             .onAppear {
@@ -214,4 +228,5 @@ nonisolated enum AppRoute: Hashable {
     case auditHistory
     case sessionDetail(AuditSession)
     case lookAlikeGroups
+    case debugLog
 }

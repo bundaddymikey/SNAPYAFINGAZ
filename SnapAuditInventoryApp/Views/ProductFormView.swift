@@ -102,11 +102,21 @@ struct ProductFormView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         save()
-                        dismiss()
+                        if viewModel.saveError == nil {
+                            dismiss()
+                        }
                     }
                     .fontWeight(.semibold)
                     .disabled(!isValid)
                 }
+            }
+            .alert("Cannot Save", isPresented: Binding(
+                get: { viewModel.saveError != nil },
+                set: { if !$0 { viewModel.saveError = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(viewModel.saveError ?? "")
             }
         }
     }
