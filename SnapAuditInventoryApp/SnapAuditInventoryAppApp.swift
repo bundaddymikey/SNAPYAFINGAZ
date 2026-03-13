@@ -5,8 +5,16 @@ import SwiftData
 struct SnapAuditInventoryAppApp: App {
     let container: ModelContainer
     let isInSafeMode: Bool
+    @State private var multipeerService = MultipeerService()
+    @State private var syncService: SessionSyncService
+    @State private var scannerConnectionService = ScannerConnectionService()
+    @State private var auditCountService = AuditCountService()
 
     init() {
+        let mp = MultipeerService()
+        _multipeerService = State(initialValue: mp)
+        _syncService = State(initialValue: SessionSyncService(multipeerService: mp))
+
         let schema = Schema([
             AppUser.self,
             Location.self,
@@ -34,6 +42,7 @@ struct SnapAuditInventoryAppApp: App {
             VariantReferencePair.self,
             VariantEvidenceScore.self,
             AuditPreset.self,
+            ShelfExpectedRow.self,
         ])
 
         var resolvedContainer: ModelContainer?
@@ -76,9 +85,18 @@ struct SnapAuditInventoryAppApp: App {
             if isInSafeMode {
                 SafeModeView()
                     .modelContainer(container)
+                    .environment(syncService)
+                    .environment(scannerConnectionService)
             } else {
                 ContentView()
                     .modelContainer(container)
+                    .environment(syncService)
+                    .environment(scannerConnectionService)
+                    .environment(auditCountService)
+                    .onAppear {
+                        auditCountService.syncService = syncService
+                        syncService.countService = auditCountService
+                    }
             }
         }
     }

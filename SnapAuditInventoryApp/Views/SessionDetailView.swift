@@ -8,6 +8,7 @@ struct SessionDetailView: View {
 
     @State private var showDeleteAlert = false
     @State private var showReviewQueue = false
+    @State private var showBagAuditScan = false
     @State private var selectedTab: SessionTab = .results
     @State private var showShareSheet = false
     @State private var exportURL: URL?
@@ -112,6 +113,9 @@ struct SessionDetailView: View {
         .sheet(isPresented: $showReviewQueue) {
             ReviewQueueView(session: session, auditViewModel: auditViewModel)
         }
+        .sheet(isPresented: $showBagAuditScan) {
+            BagAuditScanView(session: session)
+        }
         .sheet(isPresented: $showShareSheet) {
             if let url = exportURL {
                 ShareSheet(activityItems: [url])
@@ -215,6 +219,19 @@ struct SessionDetailView: View {
                 Text("Audit Results")
                     .font(.headline)
                 Spacer()
+                // Scanner button — opens Bag Audit Scan view
+                Button {
+                    showBagAuditScan = true
+                } label: {
+                    Label("Scan", systemImage: "barcode.viewfinder")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(.cyan, in: Capsule())
+                }
+                .buttonStyle(.plain)
+
                 if session.pendingLineItemCount > 0 {
                     Button {
                         showReviewQueue = true

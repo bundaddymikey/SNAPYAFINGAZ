@@ -37,7 +37,7 @@ struct LocationDetailView: View {
             ShelfLayoutFormView(locationId: location.id)
         }
         .navigationDestination(for: ShelfLayout.self) { layout in
-            ShelfLayoutEditorView(layout: layout)
+            ShelfDetailView(layout: layout)
         }
         .alert("Delete Layout?", isPresented: $showDeleteAlert, presenting: layoutToDelete) { layout in
             Button("Delete", role: .destructive) { deleteLayout(layout) }

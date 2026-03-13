@@ -47,6 +47,14 @@ final class LiveScanViewModel {
     // MARK: - Services
 
     let scanService = LiveScanService()
+    /// Optional sync service for multi-device relay. Set by the view when a device is in scanner mode.
+    var syncService: SessionSyncService?
+    /// The active AuditSession during a shared multi-device session (used for ScanEvent session ID).
+    var currentSession: AuditSession?
+    /// Unified count service — persists confirmed live detections into AuditLineItem.
+    var countService: AuditCountService?
+    /// Review fallback store — accumulates uncertain detections for operator review.
+    let fallbackStore = LiveReviewFallbackStore()
     private var processingTimer: Timer?
     private var pendingFrame: UIImage?
     private var isProcessingLocked = false
@@ -123,6 +131,7 @@ final class LiveScanViewModel {
         processingTimer = nil
         scanService.stopRunning()
         AuditLogger.shared.logSession("LiveScan: paused after \(framesProcessed) frames")
+        syncService?.sendStatusChange(status: "Paused", framesProcessed: framesProcessed, totalItems: totalItemsDetected)
     }
 
     func resumeScanning() {
@@ -137,6 +146,7 @@ final class LiveScanViewModel {
         }
 
         AuditLogger.shared.logSession("LiveScan: resumed")
+        syncService?.sendStatusChange(status: "Scanning…", framesProcessed: framesProcessed, totalItems: totalItemsDetected)
     }
 
     func finishScanning() {
@@ -145,6 +155,7 @@ final class LiveScanViewModel {
         processingTimer = nil
         scanService.stopRunning()
         AuditLogger.shared.logSession("LiveScan: finished — \(totalItemsDetected) items across \(framesProcessed) frames")
+        syncService?.sendStatusChange(status: "Finished", framesProcessed: framesProcessed, totalItems: totalItemsDetected)
     }
 
     func tearDown() {
@@ -154,6 +165,18 @@ final class LiveScanViewModel {
     }
 
     // MARK: - Frame Processing
+
+    /// Result of processing a single camera frame.
+    private struct FrameResult {
+        var detections: [LiveDetection]
+        var fallbackCandidates: [FallbackCandidate]
+
+        struct FallbackCandidate {
+            let candidates: [LiveProductCandidate]
+            let cropImage: UIImage?
+            let timestamp: Date
+        }
+    }
 
     private func processNextFrame() async {
         guard scanState == .scanning,
@@ -165,9 +188,21 @@ final class LiveScanViewModel {
         pendingFrame = nil
 
         do {
-            let detections = try await recognizeFrame(frame)
-            currentDetections = detections
-            updateRunningCounts(from: detections)
+            let result = try await recognizeFrame(frame)
+            currentDetections = result.detections
+            updateRunningCounts(from: result.detections)
+
+            // Route sub-threshold candidates to review store
+            let sessionId = currentSession?.id ?? UUID()
+            for fc in result.fallbackCandidates {
+                fallbackStore.evaluateAndRoute(
+                    candidates: fc.candidates,
+                    cropImage: fc.cropImage,
+                    timestamp: fc.timestamp,
+                    auditSessionId: sessionId
+                )
+            }
+
             framesProcessed += 1
         } catch {
             AuditLogger.shared.logError("LiveScan frame error: \(error.localizedDescription)")
@@ -178,8 +213,8 @@ final class LiveScanViewModel {
     }
 
     /// Run detection + classification on a single frame, off the main thread.
-    private func recognizeFrame(_ image: UIImage) async throws -> [LiveDetection] {
-        guard !embeddingRecords.isEmpty, !candidateSkuIds.isEmpty else { return [] }
+    private func recognizeFrame(_ image: UIImage) async throws -> FrameResult {
+        guard !embeddingRecords.isEmpty, !candidateSkuIds.isEmpty else { return FrameResult(detections: [], fallbackCandidates: []) }
 
         return try await Task.detached(priority: .userInitiated) { [candidateSkuIds, embeddingRecords, skuNameMap, countThreshold] in
             // 1. Region proposal (multi-scale)
@@ -188,8 +223,9 @@ final class LiveScanViewModel {
             // Limit to top regions for performance
             let topRegions = Array(regions.prefix(8))
 
-            // 2. Classify each region
+            // 2. Classify each region — collect all candidates even below threshold
             var detections: [LiveDetection] = []
+            var fallbackCandidates: [FrameResult.FallbackCandidate] = []
 
             for region in topRegions {
                 let candidates = try await OnDeviceEngine.shared.classify(
@@ -198,40 +234,122 @@ final class LiveScanViewModel {
                     embeddings: embeddingRecords
                 )
 
-                guard let best = candidates.first, best.score >= countThreshold else { continue }
-                let name = skuNameMap[best.skuId] ?? "Unknown"
+                guard let best = candidates.first else { continue }
 
-                let detection = LiveDetection(
-                    bbox: CGRect(
-                        x: CGFloat(region.bbox.x),
-                        y: CGFloat(region.bbox.y),
-                        width: CGFloat(region.bbox.width),
-                        height: CGFloat(region.bbox.height)
-                    ),
-                    skuId: best.skuId,
-                    skuName: name,
-                    confidence: best.score,
-                    timestamp: Date()
-                )
-                detections.append(detection)
+                // Map to LiveProductCandidate array (top 3)
+                let liveCandidates = candidates.prefix(3).map { c in
+                    LiveProductCandidate(
+                        skuId: c.skuId,
+                        skuName: skuNameMap[c.skuId] ?? "Unknown",
+                        confidence: c.score
+                    )
+                }
+
+                if best.score >= countThreshold {
+                    // Passed primary confidence threshold — still subject to guardrails on main actor
+                    let name = skuNameMap[best.skuId] ?? "Unknown"
+                    detections.append(LiveDetection(
+                        bbox: CGRect(
+                            x: CGFloat(region.bbox.x),
+                            y: CGFloat(region.bbox.y),
+                            width: CGFloat(region.bbox.width),
+                            height: CGFloat(region.bbox.height)
+                        ),
+                        skuId: best.skuId,
+                        skuName: name,
+                        confidence: best.score,
+                        timestamp: Date()
+                    ))
+                } else {
+                    // Below primary threshold — route to fallback with crop image attached
+                    fallbackCandidates.append(FrameResult.FallbackCandidate(
+                        candidates: liveCandidates,
+                        cropImage: region.cropImage,
+                        timestamp: Date()
+                    ))
+                }
             }
 
-            return detections
+            return FrameResult(detections: detections, fallbackCandidates: fallbackCandidates)
         }.value
     }
 
-    /// Accumulate running counts from detections.
-    /// Stage 1: naive counting — each detection adds to count (no dedup).
+    /// Accumulate running counts from detections, routing uncertain items to the fallback store.
     private func updateRunningCounts(from detections: [LiveDetection]) {
+        let sessionId = currentSession?.id ?? UUID()
+
         for detection in detections {
+            // Evaluate guardrails — close-match detection happens here on main actor
+            let candidates = [
+                LiveProductCandidate(
+                    skuId: detection.skuId,
+                    skuName: detection.skuName,
+                    confidence: detection.confidence
+                )
+            ]
+
+            let shouldCount = fallbackStore.evaluateAndRoute(
+                candidates: candidates,
+                cropImage: nil, // crop images come from recognizeFrame for sub-threshold paths
+                timestamp: detection.timestamp,
+                auditSessionId: sessionId
+            )
+
+            guard shouldCount else {
+                AuditLogger.shared.logRecognition(
+                    skuName: detection.skuName,
+                    score: Double(detection.confidence),
+                    status: "routed-to-review"
+                )
+                continue
+            }
+
             runningCounts[detection.skuName, default: 0] += 1
             totalItemsDetected += 1
+
+            // Persist into AuditLineItem via unified pipeline
+            if let countService, let session = currentSession, let context = modelContext {
+                countService.recordCount(
+                    session: session,
+                    skuId: detection.skuId,
+                    skuName: detection.skuName,
+                    quantity: 1,
+                    confidence: Double(detection.confidence),
+                    sourceType: .liveCamera,
+                    context: context,
+                    skipBroadcast: true // ScanEvent broadcast happens below for multi-device
+                )
+            }
 
             AuditLogger.shared.logRecognition(
                 skuName: detection.skuName,
                 score: Double(detection.confidence),
                 status: "live-counted"
             )
+
+            guard let syncService, syncService.isScannerConnected else { continue }
+
+            // Stage 1: emit a structured ScanEvent when in a shared session
+            if syncService.isInSharedSession, let session = currentSession {
+                let event = ScanEvent(
+                    sessionId: session.id,
+                    skuId: detection.skuId,
+                    skuName: detection.skuName,
+                    confidence: Double(detection.confidence),
+                    originDeviceId: syncService.multipeerService.deviceId,
+                    originDeviceRole: .scanner,
+                    sourceType: .liveCamera
+                )
+                syncService.sendScanEvent(event)
+            } else {
+                // Phase 0 fallback when not using session code join
+                let payload = ScanResultPayload(
+                    skuId: detection.skuId,
+                    skuName: detection.skuName,
+                    confidence: Double(detection.confidence)
+                )
+                syncService.sendScanResult(payload)
+            }
         }
     }
 

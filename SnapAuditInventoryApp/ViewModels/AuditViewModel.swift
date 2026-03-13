@@ -56,6 +56,9 @@ class AuditViewModel {
     var processingProgress: Double = 0
     var processingStatus: String = ""
 
+    /// Unified count service — used for delta/flag recomputation after photo/video evidence changes.
+    var countService: AuditCountService?
+
     private var modelContext: ModelContext?
 
     func setup(context: ModelContext) {
@@ -188,6 +191,134 @@ class AuditViewModel {
         }
 
         session.inventorySnapshot = snapshot
+        try? modelContext.save()
+    }
+
+    // MARK: - Shelf Expected Inventory
+
+    /// Called when an audit starts for a shelf that has expected inventory attached.
+    ///
+    /// For each `ShelfExpectedRow` on the layout, this creates (or updates) an
+    /// `AuditLineItem` with `expectedQty` pre-populated. The expected quantity
+    /// becomes the source of truth for Bag Audit diff calculations.
+    ///
+    /// - Matching priority:
+    ///   1. `ShelfExpectedRow.matchedSkuId` (pre-resolved at CSV upload time)
+    ///   2. barcode field on a `ProductSKU`
+    ///   3. productId field on a `ProductSKU` (treated as UPC/SKU code)
+    ///   4. name-based fuzzy match (skuNameSnapshot)
+    func loadExpectedInventoryFromShelf(layout: ShelfLayout, session: AuditSession) {
+        guard let modelContext else { return }
+        guard layout.hasExpectedInventory else { return }
+
+        // Build a lookup from skuId → ProductSKU for fast resolution
+        let allSKUs = (try? modelContext.fetch(FetchDescriptor<ProductSKU>())) ?? []
+        let skuById = Dictionary(uniqueKeysWithValues: allSKUs.compactMap { sku -> (UUID, ProductSKU)? in
+            (sku.id, sku)
+        })
+        let skuByBarcode = Dictionary(
+            allSKUs.compactMap { sku -> (String, ProductSKU)? in
+                guard let bc = sku.barcode, !bc.isEmpty else { return nil }
+                return (bc, sku)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        for expectedRow in layout.expectedRows {
+            // Resolve skuId
+            var resolvedSkuId: UUID? = expectedRow.matchedSkuId
+            var resolvedName = expectedRow.productName
+
+            if resolvedSkuId == nil, !expectedRow.barcode.isEmpty,
+               let sku = skuByBarcode[expectedRow.barcode] {
+                resolvedSkuId = sku.id
+                resolvedName = sku.productName
+            }
+
+            if let skuId = resolvedSkuId, let sku = skuById[skuId] {
+                resolvedName = sku.productName
+            }
+
+            // Find or create the AuditLineItem for this SKU
+            if let existing = session.lineItems.first(where: {
+                $0.skuId == resolvedSkuId && resolvedSkuId != nil
+            }) {
+                existing.expectedQty = expectedRow.expectedQty
+                if let exp = existing.expectedQty {
+                    existing.delta = existing.visionCount - exp
+                    existing.deltaPercent = exp > 0
+                        ? Double(existing.visionCount - exp) / Double(exp) * 100
+                        : nil
+                }
+            } else {
+                let lineItem = AuditLineItem(
+                    session: session,
+                    skuId: resolvedSkuId,
+                    skuNameSnapshot: resolvedName,
+                    visionCount: 0,
+                    countConfidence: 1.0,
+                    reviewStatus: .confirmed
+                )
+                lineItem.expectedQty = expectedRow.expectedQty
+                lineItem.delta = -expectedRow.expectedQty
+                lineItem.deltaPercent = -100
+                modelContext.insert(lineItem)
+                session.lineItems.append(lineItem)
+            }
+        }
+
+        try? modelContext.save()
+    }
+
+    /// Parse a CSV and replace the expected inventory for a shelf.
+    ///
+    /// Expected CSV columns (order-independent, case-insensitive headers):
+    ///   `product_name` | `name` — required
+    ///   `brand`
+    ///   `product_id` | `sku`
+    ///   `barcode` | `upc`
+    ///   `expected_qty` | `qty` | `quantity` — required
+    ///
+    /// After parsing, rows are matched against the `ProductSKU` catalog by barcode,
+    /// then by productId, so that `matchedSkuId` is pre-resolved for fast audit-start loading.
+    func uploadShelfExpectedInventory(
+        layout: ShelfLayout,
+        csvText: String,
+        filename: String
+    ) {
+        guard let modelContext else { return }
+
+        let rows = ShelfCSVParser.parse(csvText: csvText)
+
+        // Match against product catalog
+        let allSKUs = (try? modelContext.fetch(FetchDescriptor<ProductSKU>())) ?? []
+        let skuByBarcode = Dictionary(
+            allSKUs.compactMap { sku -> (String, ProductSKU)? in
+                guard let bc = sku.barcode, !bc.isEmpty else { return nil }
+                return (bc.lowercased(), sku)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let skuByProductId = Dictionary(
+            allSKUs.compactMap { sku -> (String, ProductSKU)? in
+                guard !sku.sku.isEmpty else { return nil }
+                return (sku.sku.lowercased(), sku)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        for row in rows {
+            if !row.barcode.isEmpty, let sku = skuByBarcode[row.barcode.lowercased()] {
+                row.matchedSkuId = sku.id
+                row.isMatched = true
+            } else if !row.productId.isEmpty, let sku = skuByProductId[row.productId.lowercased()] {
+                row.matchedSkuId = sku.id
+                row.isMatched = true
+            }
+            modelContext.insert(row)
+        }
+
+        layout.replaceExpectedRows(with: rows, csvText: csvText, filename: filename)
         try? modelContext.save()
     }
 
@@ -943,11 +1074,18 @@ class AuditViewModel {
             lineItem.reviewStatus = .confirmed
         }
 
+        // Propagate non-mismatch evidence flags to the line item
         var flags: [FlagReason] = lineItem.flagReasons.filter { $0.isMismatch }
         for ev in nonRejected {
             for r in ev.flagReasons where !flags.contains(r) && !r.isMismatch { flags.append(r) }
         }
         lineItem.flagReasons = flags
+
+        // Refresh deltas + mismatch flags via unified service
+        if let countService {
+            countService.recomputeDeltas(lineItem)
+            countService.recomputeMismatchFlags(lineItem)
+        }
     }
 
     private func sampleVideoFrames(session: AuditSession, modelContext: ModelContext) async {
@@ -1311,40 +1449,26 @@ class AuditViewModel {
         for item in session.lineItems {
             guard let skuId = item.skuId else { continue }
 
-            let expected = expectedQtyMap[skuId]
-            let onHand = onHandQtyMap[skuId]
+            item.expectedQty = expectedQtyMap[skuId]
+            item.posOnHand = onHandQtyMap[skuId]
 
-            item.expectedQty = expected
-            item.posOnHand = onHand
-
-            if let exp = expected {
-                let d = item.visionCount - exp
-                item.delta = d
-                item.deltaPercent = exp > 0 ? Double(d) / Double(exp) : nil
-            }
-
-            if let oh = onHand {
-                let d = item.visionCount - oh
-                item.deltaOnHand = d
-                item.deltaOnHandPercent = oh > 0 ? Double(d) / Double(oh) : nil
-            }
-
-            var flags = item.flagReasons.filter { !$0.isMismatch }
-
-            if let exp = expected {
-                if exp == 0 && item.visionCount > 0 {
-                    flags.appendIfNotContains(.expectedZeroButFound)
-                } else if item.visionCount < exp {
-                    flags.appendIfNotContains(.shortage)
-                } else if item.visionCount > exp {
-                    flags.appendIfNotContains(.overage)
+            // Unified delta + flag computation
+            if let countService {
+                countService.recomputeDeltas(item)
+                countService.recomputeMismatchFlags(item)
+            } else {
+                // Fallback if countService not injected
+                if let exp = item.expectedQty {
+                    let d = item.visionCount - exp
+                    item.delta = d
+                    item.deltaPercent = exp > 0 ? Double(d) / Double(exp) : nil
                 }
-                if let d = item.delta, exp > 0 {
-                    let pct = abs(Double(d)) / Double(exp)
-                    if abs(d) > 1 && pct > 0.10 { flags.appendIfNotContains(.largeVariance) }
+                if let oh = item.posOnHand {
+                    let d = item.visionCount - oh
+                    item.deltaOnHand = d
+                    item.deltaOnHandPercent = oh > 0 ? Double(d) / Double(oh) : nil
                 }
             }
-            item.flagReasons = flags
         }
 
         // Ghost items for expected SKUs not detected
@@ -1361,14 +1485,21 @@ class AuditViewModel {
             )
             item.expectedQty = expectedQty
             item.posOnHand = onHandQtyMap[skuId]
-            item.delta = -expectedQty
-            item.deltaPercent = -1.0
-            if let oh = item.posOnHand {
-                item.deltaOnHand = -oh
-                item.deltaOnHandPercent = oh > 0 ? -1.0 : nil
-            }
-            item.flagReasons = [.shortage]
             modelContext.insert(item)
+
+            // Use unified service for ghost items too
+            if let countService {
+                countService.recomputeDeltas(item)
+                countService.recomputeMismatchFlags(item)
+            } else {
+                item.delta = -expectedQty
+                item.deltaPercent = -1.0
+                if let oh = item.posOnHand {
+                    item.deltaOnHand = -oh
+                    item.deltaOnHandPercent = oh > 0 ? -1.0 : nil
+                }
+                item.flagReasons = [.shortage]
+            }
         }
 
         try? modelContext.save()

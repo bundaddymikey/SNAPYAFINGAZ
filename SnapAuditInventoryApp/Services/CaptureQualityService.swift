@@ -54,7 +54,7 @@ nonisolated struct CaptureQualityService: Sendable {
         let centerMean = mean(centerLuma)
         let outerMean = mean(outerLuma)
         let centerStdDev = standardDeviation(centerLuma, mean: centerMean)
-        let outerStdDev = standardDeviation(outerLuma, mean: outerMean)
+        // let outerStdDev = standardDeviation(outerLuma, mean: outerMean) // Removed unused variable
 
         let clutterOutsideMainArea = normalized(mean(outsideAuditEdgeValues) * 2.6)
         let glareScore = normalized(Double(brightPixels) / Double(max(totalPixels, 1)) * 10.0)

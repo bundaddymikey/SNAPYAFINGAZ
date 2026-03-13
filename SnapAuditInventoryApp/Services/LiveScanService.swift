@@ -1,5 +1,5 @@
 import Foundation
-import AVFoundation
+@preconcurrency import AVFoundation
 import UIKit
 
 /// Camera service for Real-Time Scan mode.
@@ -80,19 +80,21 @@ final class LiveScanService: NSObject {
     }
 
     func startRunning() {
-        sessionQueue.async { [weak self] in
-            self?.captureSession?.startRunning()
-            Task { @MainActor [weak self] in
-                self?.isRunning = true
+        let session = captureSession
+        sessionQueue.async {
+            session?.startRunning()
+            Task { @MainActor in
+                self.isRunning = true
             }
         }
     }
 
     func stopRunning() {
-        sessionQueue.async { [weak self] in
-            self?.captureSession?.stopRunning()
-            Task { @MainActor [weak self] in
-                self?.isRunning = false
+        let session = captureSession
+        sessionQueue.async {
+            session?.stopRunning()
+            Task { @MainActor in
+                self.isRunning = false
             }
         }
     }
@@ -108,7 +110,7 @@ final class LiveScanService: NSObject {
 
 // MARK: - Sample Buffer Delegate
 
-extension LiveScanService: @preconcurrency AVCaptureVideoDataOutputSampleBufferDelegate {
+extension LiveScanService: AVCaptureVideoDataOutputSampleBufferDelegate {
     nonisolated func captureOutput(
         _ output: AVCaptureOutput,
         didOutput sampleBuffer: CMSampleBuffer,

@@ -12,6 +12,7 @@ enum AuditFlowStep {
 
 struct AuditFlowView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(AuditCountService.self) private var countService
     let authViewModel: AuthViewModel
     @State private var auditViewModel = AuditViewModel()
     @State private var liveScanViewModel = LiveScanViewModel()
@@ -83,6 +84,9 @@ struct AuditFlowView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.25), value: stepId)
+            .onAppear {
+                auditViewModel.countService = countService
+            }
         }
     }
 

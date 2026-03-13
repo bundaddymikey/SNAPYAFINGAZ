@@ -3,6 +3,7 @@ import SwiftData
 
 struct DashboardView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(AuditCountService.self) private var countService
     @Bindable var authViewModel: AuthViewModel
     @State private var catalogVM = CatalogViewModel()
     @State private var locationsVM = LocationsViewModel()
@@ -168,6 +169,7 @@ struct DashboardView: View {
                 catalogVM.setup(context: modelContext)
                 locationsVM.setup(context: modelContext)
                 auditVM.setup(context: modelContext)
+                auditVM.countService = countService
             }
             .fullScreenCover(isPresented: $showAuditFlow) {
                 auditVM.fetchSessions()

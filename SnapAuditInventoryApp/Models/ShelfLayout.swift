@@ -25,7 +25,16 @@ class ShelfLayout {
     var notes: String
     var createdAt: Date
 
+    // Expected inventory CSV attachment
+    /// Raw CSV text of the expected inventory file for this shelf.
+    var expectedInventoryCSV: String?
+    /// Original filename of the last uploaded expected inventory CSV.
+    var expectedInventoryFilename: String?
+    /// Timestamp when the expected sheet was last replaced.
+    var lastExpectedSheetUpdatedAt: Date?
+
     @Relationship(deleteRule: .cascade) var zones: [ShelfZone] = []
+    @Relationship(deleteRule: .cascade) var expectedRows: [ShelfExpectedRow] = []
 
     init(name: String, locationId: UUID, notes: String = "") {
         self.id = UUID()
@@ -41,6 +50,24 @@ class ShelfLayout {
 
     var assignedZoneCount: Int {
         zones.filter { $0.isAssigned }.count
+    }
+
+    var hasExpectedInventory: Bool { !expectedRows.isEmpty }
+
+    var totalExpectedQty: Int { expectedRows.reduce(0) { $0 + $1.expectedQty } }
+
+    /// Replace the existing expected sheet with a new set of rows.
+    /// Existing rows are removed; new rows are inserted directly.
+    /// Call `modelContext.save()` after.
+    func replaceExpectedRows(with newRows: [ShelfExpectedRow], csvText: String, filename: String) {
+        expectedRows.removeAll()
+        for row in newRows {
+            row.layout = self
+            expectedRows.append(row)
+        }
+        expectedInventoryCSV = csvText
+        expectedInventoryFilename = filename
+        lastExpectedSheetUpdatedAt = Date()
     }
 }
 
@@ -107,5 +134,43 @@ class LayoutAssignmentHistory {
         self.changedBy = changedBy
         self.previousSkuName = previousSkuName
         self.newSkuName = newSkuName
+    }
+}
+
+// MARK: - ShelfExpectedRow
+
+/// One row from the expected inventory CSV attached to a ShelfLayout.
+/// Each row represents a product expected to be present on the shelf,
+/// with the quantity that should be counted during a Bag Audit.
+@Model
+class ShelfExpectedRow {
+    @Attribute(.unique) var id: UUID
+    var layout: ShelfLayout?
+
+    // Product identification fields (from CSV columns)
+    var productName: String
+    var brand: String
+    var productId: String      // UPC / SKU code from the CSV
+    var barcode: String        // Barcode string (for scanner matching)
+    var expectedQty: Int
+
+    // Resolved after matching against the ProductSKU catalog
+    var matchedSkuId: UUID?
+    var isMatched: Bool
+
+    init(
+        productName: String,
+        brand: String = "",
+        productId: String = "",
+        barcode: String = "",
+        expectedQty: Int
+    ) {
+        self.id = UUID()
+        self.productName = productName
+        self.brand = brand
+        self.productId = productId
+        self.barcode = barcode
+        self.expectedQty = expectedQty
+        self.isMatched = false
     }
 }

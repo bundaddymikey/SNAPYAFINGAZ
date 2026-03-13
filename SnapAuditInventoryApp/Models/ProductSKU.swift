@@ -7,7 +7,7 @@ extension String {
     /// Returns a search-normalized version of the string:
     /// lowercase, whitespace-trimmed, collapsed interior spaces,
     /// stripped of leading/trailing punctuation.
-    var normalized: String {
+    nonisolated var normalized: String {
         var s = self.lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
         // Collapse repeated spaces

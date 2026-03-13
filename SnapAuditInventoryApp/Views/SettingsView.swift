@@ -3,6 +3,7 @@ import SwiftData
 
 struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(ScannerConnectionService.self) private var scannerConnection
     @Bindable var authViewModel: AuthViewModel
     @AppStorage("isDemoMode") private var isDemoMode = false
     @AppStorage("frameSamplingRate") private var frameSamplingRate: Int = 2
@@ -29,9 +30,11 @@ struct SettingsView: View {
     @AppStorage("defaultRecognitionScope") private var defaultRecognitionScopeRaw: String = RecognitionScope.all.rawValue
     @AppStorage("defaultStrictBrandFilter") private var defaultStrictBrandFilter: Bool = true
     @AppStorage("defaultAllowPossibleStragglers") private var defaultAllowPossibleStragglers: Bool = false
+    @AppStorage("hardwareScannerEnabled") private var hardwareScannerEnabled: Bool = true
     @State private var showDemoAlert = false
     @State private var showClearAlert = false
     @State private var pendingDemoState = false
+    @State private var showDiscoverySheet = false
     @State private var showSampleDataAlert = false
     @State private var sampleDataMessage = ""
 
@@ -424,6 +427,93 @@ struct SettingsView: View {
             } footer: {
                 Text("Double-tap any line item in results to hear it read aloud. Use the speaker button to read all items.")
                     .font(.caption2)
+            }
+
+            Section {
+                Toggle(isOn: $hardwareScannerEnabled) {
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Hardware Scanner")
+                            Text("Accept barcode input from Bluetooth HID scanners (e.g. Inateck BCST-70)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: "barcode.viewfinder")
+                            .foregroundStyle(.cyan)
+                    }
+                }
+            } header: {
+                Text("Hardware Scanner")
+            } footer: {
+                Text("Pair your scanner in iOS Settings → Bluetooth. The scanner sends barcodes as keyboard input — no SDK required.")
+                    .font(.caption2)
+            }
+
+            Section {
+                // Connection status
+                HStack {
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Status")
+                            Text(scannerConnection.state.displayName)
+                                .font(.caption)
+                                .foregroundStyle(scannerConnection.state.isConnected ? .green : .secondary)
+                        }
+                    } icon: {
+                        Image(systemName: scannerConnection.state.icon)
+                            .foregroundStyle(scannerConnection.state.isConnected ? .green : .secondary)
+                    }
+                }
+
+                // Battery (only when connected)
+                if scannerConnection.state.isConnected {
+                    HStack {
+                        Label("Battery", systemImage: "battery.75percent")
+                        Spacer()
+                        if let battery = scannerConnection.batteryLevel {
+                            Text("\(battery)%")
+                                .font(.subheadline.monospacedDigit())
+                                .foregroundStyle(.green)
+                        } else {
+                            Text("—")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                // Scan for Scanners button
+                if !scannerConnection.state.isConnected {
+                    Button {
+                        showDiscoverySheet = true
+                    } label: {
+                        Label("Scan for Scanners", systemImage: "antenna.radiowaves.left.and.right")
+                    }
+                }
+
+                // Disconnect button
+                if scannerConnection.state.isConnected {
+                    Button(role: .destructive) {
+                        scannerConnection.disconnect()
+                    } label: {
+                        Label("Disconnect", systemImage: "xmark.circle")
+                    }
+
+                    // Test Beep
+                    Button {
+                        scannerConnection.beep()
+                    } label: {
+                        Label("Test Beep", systemImage: "speaker.wave.2")
+                    }
+                }
+            } header: {
+                Text("Scanner Connection (SDK)")
+            } footer: {
+                Text("Connect directly to the BCST-70 via Inateck SDK for battery monitoring, beeper control, and advanced features.")
+                    .font(.caption2)
+            }
+            .sheet(isPresented: $showDiscoverySheet) {
+                ScannerDiscoverySheet(connectionService: scannerConnection)
             }
 
             Section("Data Management") {

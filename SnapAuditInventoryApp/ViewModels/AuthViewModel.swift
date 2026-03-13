@@ -26,7 +26,7 @@ class AuthViewModel {
     }
 
     func attemptLogin() {
-        guard let selectedUser, let modelContext else { return }
+        guard let selectedUser = selectedUser else { return }
         if PINService.verify(pin: pinEntry, hash: selectedUser.pinHash, salt: selectedUser.pinSalt) {
             currentUser = selectedUser
             isAuthenticated = true

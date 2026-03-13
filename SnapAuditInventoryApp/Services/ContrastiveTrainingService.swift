@@ -277,7 +277,7 @@ nonisolated final class ContrastiveTrainingService: Sendable {
         }
 
         // Use the crop image's embedding if already computed
-        guard let cgImage = cropImage.cgImage else {
+        guard cropImage.cgImage != nil else {
             return ComparisonMetric(boost: 0, penalty: 0, details: [])
         }
 

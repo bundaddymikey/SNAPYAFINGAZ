@@ -7,17 +7,29 @@ import AVFoundation
 struct LiveScanView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+    @Environment(SessionSyncService.self) private var syncService
+    @Environment(ScannerConnectionService.self) private var scannerConnection
+    @Environment(AuditCountService.self) private var countService
     let session: AuditSession
     @Bindable var viewModel: LiveScanViewModel
     let onFinish: () -> Void
 
     @State private var showFinishAlert = false
+    @State private var showFallbackReview = false
+    @State private var voiceEntryVM = VoiceEntryViewModel()
+    @State private var inputRouter: BarcodeInputRouter?
 
     var body: some View {
         ZStack {
             // Camera preview
             CameraPreviewLayer(scanService: viewModel.scanService)
                 .ignoresSafeArea()
+
+            // Hidden UIKit host for barcode input (SDK or HID)
+            if let router = inputRouter {
+                BarcodeInputHostView(router: router)
+                    .frame(width: 0, height: 0)
+            }
 
             // Bounding box overlays
             GeometryReader { geo in
@@ -66,21 +78,72 @@ struct LiveScanView: View {
         }
         .navigationBarBackButtonHidden()
         .statusBarHidden()
+        .sheet(isPresented: $showFallbackReview) {
+            LiveReviewFallbackView(session: session, store: viewModel.fallbackStore)
+        }
         .onAppear {
             viewModel.setup(context: modelContext)
+            viewModel.syncService = syncService
+            viewModel.currentSession = session
+            viewModel.countService = countService
+            voiceEntryVM.loadCatalog(from: modelContext)
+            voiceEntryVM.onCountIncremented = { sku, _ in
+                viewModel.runningCounts[sku.productName, default: 0] += 1
+                viewModel.totalItemsDetected += 1
+                // Persist via unified pipeline (handles delta, flags, broadcast)
+                countService.recordCount(
+                    session: session,
+                    skuId: sku.id,
+                    skuName: sku.productName,
+                    quantity: 1,
+                    sourceType: .voice,
+                    context: modelContext
+                )
+            }
+            hardwareScannerSetup: do {
+                let router = BarcodeInputRouter(connectionService: scannerConnection)
+                router.onBarcodeScanned = { code in
+                    if let product = router.hid.lookupProduct(barcode: code, context: modelContext) {
+                        viewModel.runningCounts[product.productName, default: 0] += 1
+                        viewModel.totalItemsDetected += 1
+                        // Persist via unified pipeline (replaces HardwareBarcodeService.incrementCount)
+                        countService.recordCount(
+                            session: session,
+                            skuId: product.id,
+                            skuName: product.productName,
+                            quantity: 1,
+                            sourceType: .barcode,
+                            context: modelContext
+                        )
+                        TTSService.shared.speakBarcodeScan(productName: product.productName)
+                    } else {
+                        TTSService.shared.speakUnknownBarcode(code)
+                    }
+                }
+                inputRouter = router
+            }
             Task { await viewModel.startScanning() }
         }
         .onDisappear {
             viewModel.tearDown()
+            inputRouter?.deactivate()
+            viewModel.fallbackStore.clear()
         }
         .alert("Finish Scan?", isPresented: $showFinishAlert) {
+            if viewModel.fallbackStore.pendingCount > 0 {
+                Button("Review First") {
+                    showFallbackReview = true
+                }
+            }
             Button("Finish") {
                 viewModel.finishScanning()
                 onFinish()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Stop scanning and view results. \(viewModel.totalItemsDetected) items detected across \(viewModel.framesProcessed) frames.")
+            let pending = viewModel.fallbackStore.pendingCount
+            let pendingText = pending > 0 ? " \(pending) item\(pending == 1 ? "" : "s") still need review." : ""
+            Text("Stop scanning and view results. \(viewModel.totalItemsDetected) items detected across \(viewModel.framesProcessed) frames.\(pendingText)")
         }
     }
 
@@ -113,6 +176,14 @@ struct LiveScanView: View {
             .padding(.vertical, 6)
             .background(.ultraThinMaterial, in: Capsule())
 
+            // Review fallback badge
+            if viewModel.fallbackStore.pendingCount > 0 {
+                LiveReviewBadge(count: viewModel.fallbackStore.pendingCount) {
+                    showFallbackReview = true
+                }
+                .animation(.spring(duration: 0.3), value: viewModel.fallbackStore.pendingCount)
+            }
+
             Spacer()
 
             // Frame counter
@@ -136,6 +207,20 @@ struct LiveScanView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(.ultraThinMaterial, in: Capsule())
+
+            // Connected device indicator
+            if syncService.isScannerConnected {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(.green)
+                        .frame(width: 6, height: 6)
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                        .font(.caption2)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.ultraThinMaterial, in: Capsule())
+            }
         }
     }
 
@@ -206,6 +291,14 @@ struct LiveScanView: View {
                     .frame(width: 64, height: 64)
                     .background(.ultraThinMaterial, in: Circle())
             }
+
+            Spacer()
+
+            // Voice Quick Entry
+            VoiceQuickEntryButton(viewModel: voiceEntryVM)
+                .font(.body.weight(.semibold))
+                .frame(width: 50, height: 50)
+                .background(.ultraThinMaterial, in: Circle())
 
             Spacer()
 

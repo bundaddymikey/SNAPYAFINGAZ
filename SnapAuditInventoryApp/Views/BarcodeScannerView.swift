@@ -6,6 +6,7 @@ import AVFoundation
 /// Detects barcodes, looks up matching ProductSKU, and announces via TTS.
 struct BarcodeScannerView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(ScannerConnectionService.self) private var scannerConnection
     let session: AuditSession
     let auditViewModel: AuditViewModel
 
@@ -17,6 +18,7 @@ struct BarcodeScannerView: View {
     @State private var flashGreen: Bool = false
     @State private var flashOrange: Bool = false
     @State private var scannedItems: [ScannedBarcodeItem] = []
+    @State private var inputRouter: BarcodeInputRouter?
 
     struct ScannedBarcodeItem: Identifiable {
         let id = UUID()
@@ -32,6 +34,12 @@ struct BarcodeScannerView: View {
 
             BarcodeCameraPreview(onBarcodeDetected: handleBarcode)
 
+            // Hidden UIKit host for barcode input (SDK or HID)
+            if let router = inputRouter {
+                BarcodeInputHostView(router: router)
+                    .frame(width: 0, height: 0)
+            }
+
             VStack {
                 // Top scan indicator
                 HStack(spacing: 8) {
@@ -41,6 +49,19 @@ struct BarcodeScannerView: View {
                     Text("Barcode Scanner")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.white)
+
+                    if let mode = inputRouter?.activeMode, mode != .none {
+                        HStack(spacing: 4) {
+                            Circle().fill(.cyan).frame(width: 6, height: 6)
+                            Text(mode == .sdk ? "SDK" : "HID")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(.cyan)
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(.cyan.opacity(0.15), in: Capsule())
+                    }
+
                     Spacer()
                     Text("\(scanCount) scanned")
                         .font(.caption.monospacedDigit())
@@ -81,6 +102,16 @@ struct BarcodeScannerView: View {
             }
             .animation(.spring(response: 0.35), value: lastMatchedProduct?.id)
             .animation(.spring(response: 0.35), value: showUnknownBanner)
+        }
+        .onAppear {
+            let router = BarcodeInputRouter(connectionService: scannerConnection)
+            router.onBarcodeScanned = { code in
+                handleBarcode(code)
+            }
+            inputRouter = router
+        }
+        .onDisappear {
+            inputRouter?.deactivate()
         }
     }
 
