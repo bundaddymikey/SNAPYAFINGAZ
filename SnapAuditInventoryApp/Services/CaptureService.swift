@@ -21,6 +21,10 @@ class CaptureService {
     private var recordingDelegate: VideoRecordingDelegate?
     private var recordingTimer: Timer?
     private var _previewLayer: AVCaptureVideoPreviewLayer?
+    /// Retains PhotoCaptureDelegate instances until their async callback fires.
+    /// AVCapturePhotoOutput holds only a weak reference to its delegate, so without
+    /// this array the delegate is immediately deallocated and the callback never fires.
+    private var activePhotoDelegates: [PhotoCaptureDelegate] = []
 
     /// Persistent preview layer — created once, attached by CaptureServicePreviewLayer UIViewRepresentable.
     var previewLayer: AVCaptureVideoPreviewLayer? {
@@ -161,10 +165,16 @@ class CaptureService {
         if let data {
             capturedPhotos.append(data)
             lastCapturedImage = UIImage(data: data)
+            #if DEBUG
+            print("[CaptureService] takePhoto — simulator photo appended (total: \(capturedPhotos.count))")
+            #endif
         }
         completion(data)
         #else
+        errorMessage = nil
         guard let photoOutput else {
+            let msg = "Camera not ready — tap to retry"
+            errorMessage = msg
             #if DEBUG
             print("[CaptureService] takePhoto — ERROR: photoOutput is nil (session not set up?)")
             #endif
@@ -172,16 +182,38 @@ class CaptureService {
             return
         }
         #if DEBUG
-        print("[CaptureService] takePhoto — capturing on device")
+        print("[CaptureService] takePhoto — capturing photo on device")
         #endif
         let settings = AVCapturePhotoSettings()
-        let delegate = PhotoCaptureDelegate { [weak self] data in
-            if let data {
-                self?.capturedPhotos.append(data)
-                self?.lastCapturedImage = UIImage(data: data)
+        let delegateTag = UUID()
+        let delegate = PhotoCaptureDelegate(tag: delegateTag) { [weak self] data, error in
+            // Remove from retention array once callback fires (keyed by tag to avoid forward-capture)
+            self?.activePhotoDelegates.removeAll { $0.tag == delegateTag }
+            if let error {
+                self?.errorMessage = "Photo failed: \(error.localizedDescription)"
+                #if DEBUG
+                print("[CaptureService] takePhoto — ERROR from delegate: \(error.localizedDescription)")
+                #endif
+                completion(nil)
+                return
             }
+            guard let data else {
+                self?.errorMessage = "Photo produced no data"
+                #if DEBUG
+                print("[CaptureService] takePhoto — ERROR: delegate returned nil data")
+                #endif
+                completion(nil)
+                return
+            }
+            self?.capturedPhotos.append(data)
+            self?.lastCapturedImage = UIImage(data: data)
+            #if DEBUG
+            print("[CaptureService] takePhoto — photo received (total: \(self?.capturedPhotos.count ?? -1))")
+            #endif
             completion(data)
         }
+        // CRITICAL: retain the delegate — AVCapturePhotoOutput holds it weakly
+        activePhotoDelegates.append(delegate)
         photoOutput.capturePhoto(with: settings, delegate: delegate)
         #endif
     }
@@ -200,6 +232,7 @@ class CaptureService {
             }
         }
         #else
+        errorMessage = nil
         guard let movieOutput, !movieOutput.isRecording else {
             #if DEBUG
             print("[CaptureService] startRecording — skipped (movieOutput nil or already recording)")
@@ -210,10 +243,22 @@ class CaptureService {
         print("[CaptureService] startRecording — starting video capture on device")
         #endif
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).mov")
-        let delegate = VideoRecordingDelegate { [weak self] url in
+        let delegate = VideoRecordingDelegate { [weak self] url, error in
+            if let error {
+                self?.errorMessage = "Video failed: \(error.localizedDescription)"
+                self?.isRecording = false
+                self?.recordingTimer?.invalidate()
+                #if DEBUG
+                print("[CaptureService] startRecording — ERROR from delegate: \(error.localizedDescription)")
+                #endif
+                return
+            }
             self?.recordedVideoURL = url
             self?.isRecording = false
             self?.recordingTimer?.invalidate()
+            #if DEBUG
+            print("[CaptureService] startRecording — video recorded successfully: \(url?.lastPathComponent ?? "nil")")
+            #endif
         }
         recordingDelegate = delegate
         movieOutput.startRecording(to: tempURL, recordingDelegate: delegate)
@@ -243,6 +288,7 @@ class CaptureService {
 
     func tearDown() {
         recordingTimer?.invalidate()
+        activePhotoDelegates.removeAll()
         _previewLayer = nil
         Task.detached { [weak self] in
             await self?.captureSession?.stopRunning()
@@ -267,31 +313,39 @@ class CaptureService {
 }
 
 private class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
-    let completion: @MainActor (Data?) -> Void
+    let tag: UUID
+    let completion: @MainActor (Data?, Error?) -> Void
 
-    init(completion: @escaping @MainActor (Data?) -> Void) {
+    init(tag: UUID = UUID(), completion: @escaping @MainActor (Data?, Error?) -> Void) {
+        self.tag = tag
         self.completion = completion
     }
 
     nonisolated func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        if let error {
+            Task { @MainActor in
+                self.completion(nil, error)
+            }
+            return
+        }
         let data = photo.fileDataRepresentation()
         Task { @MainActor in
-            completion(data)
+            self.completion(data, nil)
         }
     }
 }
 
 private class VideoRecordingDelegate: NSObject, AVCaptureFileOutputRecordingDelegate {
-    let completion: @MainActor (URL?) -> Void
+    let completion: @MainActor (URL?, Error?) -> Void
 
-    init(completion: @escaping @MainActor (URL?) -> Void) {
+    init(completion: @escaping @MainActor (URL?, Error?) -> Void) {
         self.completion = completion
     }
 
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
         let url = error == nil ? outputFileURL : nil
         Task { @MainActor in
-            completion(url)
+            self.completion(url, error)
         }
     }
 }

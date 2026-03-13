@@ -895,8 +895,29 @@ struct CaptureView: View {
                     .foregroundStyle(.orange)
             }
 
+            // Visible error feedback — shown when takePhoto() fails
+            if let err = captureService.errorMessage {
+                Label(err, systemImage: "exclamationmark.circle.fill")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.red.opacity(0.12), in: Capsule())
+            }
+
             shutterButton(isVideo: false, disabled: !canTakeMore) {
-                captureService.takePhoto { _ in }
+                #if DEBUG
+                print("[CaptureView] Photo shutter tapped — invoking takePhoto()")
+                #endif
+                captureService.takePhoto { data in
+                    #if DEBUG
+                    if let data {
+                        print("[CaptureView] Photo result received — \(data.count) bytes")
+                    } else {
+                        print("[CaptureView] Photo result received — nil (failed)")
+                    }
+                    #endif
+                }
             }
         }
     }
@@ -918,15 +939,31 @@ struct CaptureView: View {
                     .foregroundStyle(.gray)
             }
 
+            // Visible error feedback — shown when recording fails
+            if let err = captureService.errorMessage {
+                Label(err, systemImage: "exclamationmark.circle.fill")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.red.opacity(0.12), in: Capsule())
+            }
+
             shutterButton(
                 isVideo: true,
                 disabled: captureService.recordedVideoURL != nil && !captureService.isRecording
             ) {
                 if captureService.isRecording {
                     if captureService.recordingDuration >= minVideoSeconds {
+                        #if DEBUG
+                        print("[CaptureView] Video stop tapped — stopping recording")
+                        #endif
                         captureService.stopRecording()
                     }
                 } else {
+                    #if DEBUG
+                    print("[CaptureView] Video record tapped — starting recording")
+                    #endif
                     captureService.startRecording()
                 }
             }
