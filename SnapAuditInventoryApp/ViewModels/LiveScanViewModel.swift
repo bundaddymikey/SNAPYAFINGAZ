@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import SwiftData
 import UIKit
+@preconcurrency import AVFoundation
 
 /// Lightweight detection result for a single recognized item in a live scan frame.
 struct LiveDetection: Identifiable, Equatable {
@@ -40,10 +41,6 @@ final class LiveScanViewModel {
     var framesProcessed: Int = 0
     var isProcessingFrame = false
 
-    // MARK: - Configuration
-
-    var processedFramesPerSecond: Double = 2.0
-
     // MARK: - Services
 
     let scanService = LiveScanService()
@@ -55,9 +52,13 @@ final class LiveScanViewModel {
     var countService: AuditCountService?
     /// Review fallback store — accumulates uncertain detections for operator review.
     let fallbackStore = LiveReviewFallbackStore()
-    private var processingTimer: Timer?
-    private var pendingFrame: UIImage?
+    /// Pending raw frame for recognition — CVPixelBuffer avoids UIImage conversion overhead.
+    private var pendingPixelBuffer: CVPixelBuffer?
+    /// Wall-clock time the pending buffer was received. Used for stale-frame rejection.
+    private var pendingFrameWallTime: CFAbsoluteTime = 0
     private var isProcessingLocked = false
+    /// Shared CIContext for CVPixelBuffer → CGImage conversion in recognition path.
+    private let recognitionCIContext = CIContext(options: [.useSoftwareRenderer: false])
 
     // MARK: - Catalog Data (loaded once)
 
@@ -110,25 +111,27 @@ final class LiveScanViewModel {
         }
 
         scanState = .scanning
-        scanService.setupSession { [weak self] frame in
-            self?.pendingFrame = frame
-        }
 
-        // Start the throttled processing timer
-        let interval = 1.0 / processedFramesPerSecond
-        processingTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+        // Hook the raw CVPixelBuffer callback path.
+        // LiveScanService.maxProcessingFPS is the single throttle source of truth.
+        // We process directly in the callback — no secondary timer needed.
+        scanService.rawRecognitionHandler = { [weak self] pixelBuffer, _ in
+            let arrivedAt = CFAbsoluteTimeGetCurrent()
             Task { @MainActor [weak self] in
-                await self?.processNextFrame()
+                guard let self else { return }
+                self.pendingPixelBuffer = pixelBuffer
+                self.pendingFrameWallTime = arrivedAt
+                await self.processNextFrame()
             }
         }
+        // Start the session. UIImage handler not used for recognition; preview via latestFrame.
+        scanService.setupSession(onFrame: { _ in })
 
-        AuditLogger.shared.logSession("LiveScan: started at \(processedFramesPerSecond) fps")
+        AuditLogger.shared.logSession("LiveScan: started — throttle owned by LiveScanService at \(scanService.maxProcessingFPS) fps")
     }
 
     func pauseScanning() {
         scanState = .paused
-        processingTimer?.invalidate()
-        processingTimer = nil
         scanService.stopRunning()
         AuditLogger.shared.logSession("LiveScan: paused after \(framesProcessed) frames")
         syncService?.sendStatusChange(status: "Paused", framesProcessed: framesProcessed, totalItems: totalItemsDetected)
@@ -137,30 +140,18 @@ final class LiveScanViewModel {
     func resumeScanning() {
         scanState = .scanning
         scanService.startRunning()
-
-        let interval = 1.0 / processedFramesPerSecond
-        processingTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                await self?.processNextFrame()
-            }
-        }
-
         AuditLogger.shared.logSession("LiveScan: resumed")
         syncService?.sendStatusChange(status: "Scanning…", framesProcessed: framesProcessed, totalItems: totalItemsDetected)
     }
 
     func finishScanning() {
         scanState = .finished
-        processingTimer?.invalidate()
-        processingTimer = nil
         scanService.stopRunning()
         AuditLogger.shared.logSession("LiveScan: finished — \(totalItemsDetected) items across \(framesProcessed) frames")
         syncService?.sendStatusChange(status: "Finished", framesProcessed: framesProcessed, totalItems: totalItemsDetected)
     }
 
     func tearDown() {
-        processingTimer?.invalidate()
-        processingTimer = nil
         scanService.tearDown()
     }
 
@@ -181,14 +172,22 @@ final class LiveScanViewModel {
     private func processNextFrame() async {
         guard scanState == .scanning,
               !isProcessingLocked,
-              let frame = pendingFrame else { return }
+              let pixelBuffer = pendingPixelBuffer else { return }
+
+        // Stale-frame guard: reject if the buffer is older than 2× the service throttle interval.
+        // This prevents re-processing a buffer that arrived before a pause or processing delay.
+        let staleThreshold = (2.0 / max(scanService.maxProcessingFPS, 1.0))
+        guard CFAbsoluteTimeGetCurrent() - pendingFrameWallTime <= staleThreshold else {
+            pendingPixelBuffer = nil  // discard stale buffer
+            return
+        }
 
         isProcessingLocked = true
         isProcessingFrame = true
-        pendingFrame = nil
+        pendingPixelBuffer = nil
 
         do {
-            let result = try await recognizeFrame(frame)
+            let result = try await recognizeFrame(pixelBuffer)
             currentDetections = result.detections
             updateRunningCounts(from: result.detections)
 
@@ -212,18 +211,25 @@ final class LiveScanViewModel {
         isProcessingLocked = false
     }
 
-    /// Run detection + classification on a single frame, off the main thread.
-    private func recognizeFrame(_ image: UIImage) async throws -> FrameResult {
+    /// Run detection + classification on a raw CVPixelBuffer, off the main thread.
+    /// CVPixelBuffer → CGImage conversion uses the shared recognitionCIContext (no per-frame alloc).
+    /// UIImage is only produced for crop thumbnails (evidence/review), not for the whole frame.
+    private func recognizeFrame(_ pixelBuffer: CVPixelBuffer) async throws -> FrameResult {
         guard !embeddingRecords.isEmpty, !candidateSkuIds.isEmpty else { return FrameResult(detections: [], fallbackCandidates: []) }
 
+        let ciContext = recognitionCIContext
         return try await Task.detached(priority: .userInitiated) { [candidateSkuIds, embeddingRecords, skuNameMap, countThreshold] in
-            // 1. Region proposal (multi-scale)
-            let regions = await DetectionService.shared.proposeRegions(from: image)
+            // 1. Region proposal — CVPixelBuffer-first path (no whole-frame UIImage created)
+            let regions = await DetectionService.shared.proposeRegions(from: pixelBuffer, ciContext: ciContext)
+
+            #if DEBUG
+            // print("[LiveScanViewModel] \(regions.count) regions proposed from CVPixelBuffer")
+            #endif
 
             // Limit to top regions for performance
             let topRegions = Array(regions.prefix(8))
 
-            // 2. Classify each region — collect all candidates even below threshold
+            // 2. Classify each region — crop UIImages are produced by DetectionService per-region
             var detections: [LiveDetection] = []
             var fallbackCandidates: [FrameResult.FallbackCandidate] = []
 
@@ -236,7 +242,6 @@ final class LiveScanViewModel {
 
                 guard let best = candidates.first else { continue }
 
-                // Map to LiveProductCandidate array (top 3)
                 let liveCandidates = candidates.prefix(3).map { c in
                     LiveProductCandidate(
                         skuId: c.skuId,
@@ -246,7 +251,6 @@ final class LiveScanViewModel {
                 }
 
                 if best.score >= countThreshold {
-                    // Passed primary confidence threshold — still subject to guardrails on main actor
                     let name = skuNameMap[best.skuId] ?? "Unknown"
                     detections.append(LiveDetection(
                         bbox: CGRect(
@@ -261,7 +265,6 @@ final class LiveScanViewModel {
                         timestamp: Date()
                     ))
                 } else {
-                    // Below primary threshold — route to fallback with crop image attached
                     fallbackCandidates.append(FrameResult.FallbackCandidate(
                         candidates: liveCandidates,
                         cropImage: region.cropImage,

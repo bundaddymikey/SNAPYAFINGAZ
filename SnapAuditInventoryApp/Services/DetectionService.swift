@@ -42,6 +42,23 @@ nonisolated final class DetectionService: Sendable {
             return Self.gridRegions(from: image)
         }
 
+        return await Self.proposeRegions(from: cgImage)
+    }
+
+    /// CVPixelBuffer-first overload. Converts the buffer to CGImage using a caller-supplied
+    /// shared CIContext, avoiding per-frame allocation. Preferred path for live scan.
+    func proposeRegions(from pixelBuffer: CVPixelBuffer, ciContext: CIContext) async -> [DetectionRegion] {
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
+            // Graceful fallback: apply grid to a dummy size
+            return []
+        }
+        return await Self.proposeRegions(from: cgImage)
+    }
+
+    // MARK: - Core CGImage proposal (shared by both overloads)
+
+    private static func proposeRegions(from cgImage: CGImage) async -> [DetectionRegion] {
         return await Task.detached(priority: .userInitiated) {
             let imageSize = CGSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height))
             let scales = Self.effectiveScaleLevels(for: cgImage)
