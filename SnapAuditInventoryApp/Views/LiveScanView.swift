@@ -351,27 +351,50 @@ struct CameraPreviewLayer: UIViewRepresentable {
 
     func makeUIView(context: Context) -> CameraPreviewUIView {
         let view = CameraPreviewUIView()
+        #if DEBUG
+        print("[CameraPreviewLayer] makeUIView — UIView host created for LiveScan preview")
+        #endif
         return view
     }
 
     func updateUIView(_ uiView: CameraPreviewUIView, context: Context) {
-        if let layer = scanService.previewLayer, uiView.previewLayer == nil {
-            layer.frame = uiView.bounds
-            uiView.layer.insertSublayer(layer, at: 0)
-            uiView.previewLayer = layer
+        guard let layer = scanService.previewLayer else {
+            #if DEBUG
+            print("[CameraPreviewLayer] updateUIView — previewLayer not ready yet")
+            #endif
+            return
         }
-        uiView.previewLayer?.frame = uiView.bounds
+        uiView.attach(previewLayer: layer)
     }
 }
 
 final class CameraPreviewUIView: UIView {
-    var previewLayer: AVCaptureVideoPreviewLayer?
+    private(set) var previewLayer: AVCaptureVideoPreviewLayer?
 
     override func layoutSubviews() {
         super.layoutSubviews()
         previewLayer?.frame = bounds
     }
+
+    /// Attach or re-use the preview layer. Idempotent — safe to call multiple times.
+    func attach(previewLayer layer: AVCaptureVideoPreviewLayer) {
+        if layer === previewLayer {
+            // Same layer already attached — just keep frame in sync
+            layer.frame = bounds
+            return
+        }
+        // Remove any old layer
+        previewLayer?.removeFromSuperlayer()
+        layer.videoGravity = .resizeAspectFill
+        layer.frame = bounds
+        self.layer.insertSublayer(layer, at: 0)
+        previewLayer = layer
+        #if DEBUG
+        print("[CameraPreviewUIView] Preview layer attached — bounds: \(bounds)")
+        #endif
+    }
 }
+
 
 // MARK: - Live Scan Results View (Stage 1 — simple summary)
 

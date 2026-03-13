@@ -455,14 +455,17 @@ struct CaptureView: View {
     private var cameraPreview: some View {
         GeometryReader { geo in
             ZStack {
+                // AVCaptureVideoPreviewLayer — the actual camera feed.
+                // CaptureServicePreviewLayer attaches the persistent layer from CaptureService.
                 if captureService.isSessionRunning {
-                    Color.black
+                    CaptureServicePreviewLayer(captureService: captureService)
+                        .ignoresSafeArea()
                 } else {
                     VStack(spacing: 16) {
                         Image(systemName: "camera.fill")
                             .font(.system(size: 44))
                             .foregroundStyle(.gray)
-                        Text("Initializing camera…")
+                        Text(captureService.errorMessage ?? "Initializing camera…")
                             .font(.subheadline)
                             .foregroundStyle(.gray)
                     }
@@ -526,6 +529,7 @@ struct CaptureView: View {
         }
         .frame(maxHeight: .infinity)
     }
+
 
     // MARK: - Overlay Controls
 

@@ -20,6 +20,20 @@ class CaptureService {
     private var movieOutput: AVCaptureMovieFileOutput?
     private var recordingDelegate: VideoRecordingDelegate?
     private var recordingTimer: Timer?
+    private var _previewLayer: AVCaptureVideoPreviewLayer?
+
+    /// Persistent preview layer — created once, attached by CaptureServicePreviewLayer UIViewRepresentable.
+    var previewLayer: AVCaptureVideoPreviewLayer? {
+        if let existing = _previewLayer { return existing }
+        guard let session = captureSession else { return nil }
+        let layer = AVCaptureVideoPreviewLayer(session: session)
+        layer.videoGravity = .resizeAspectFill
+        _previewLayer = layer
+        #if DEBUG
+        print("[CaptureService] Preview layer created")
+        #endif
+        return layer
+    }
 
     var hasCameraAccess: Bool {
         AVCaptureDevice.authorizationStatus(for: .video) == .authorized
@@ -27,10 +41,24 @@ class CaptureService {
 
     func requestPermissions() async -> Bool {
         let videoStatus = AVCaptureDevice.authorizationStatus(for: .video)
+        #if DEBUG
+        print("[CaptureService] Camera permission status: \(videoStatus.rawValue)")
+        #endif
         if videoStatus == .notDetermined {
             let granted = await AVCaptureDevice.requestAccess(for: .video)
-            if !granted { return false }
+            #if DEBUG
+            print("[CaptureService] Camera permission request result: \(granted)")
+            #endif
+            if !granted {
+                #if DEBUG
+                print("[CaptureService] Camera permission DENIED by user")
+                #endif
+                return false
+            }
         } else if videoStatus != .authorized {
+            #if DEBUG
+            print("[CaptureService] Camera permission not authorized (status=\(videoStatus.rawValue)) — guide user to Settings")
+            #endif
             return false
         }
 
@@ -44,9 +72,21 @@ class CaptureService {
 
     func setupSession() {
         #if targetEnvironment(simulator)
+        #if DEBUG
+        print("[CaptureService] Simulator detected — skipping AVCaptureSession setup")
+        #endif
         return
         #else
-        guard captureSession == nil else { return }
+        guard captureSession == nil else {
+            #if DEBUG
+            print("[CaptureService] setupSession called but session already exists — skipping")
+            #endif
+            return
+        }
+
+        #if DEBUG
+        print("[CaptureService] Setting up AVCaptureSession for photo/video")
+        #endif
 
         let session = AVCaptureSession()
         session.sessionPreset = .photo
@@ -54,6 +94,9 @@ class CaptureService {
         guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
               let videoInput = try? AVCaptureDeviceInput(device: camera) else {
             errorMessage = "Camera not available"
+            #if DEBUG
+            print("[CaptureService] ERROR: Could not access back camera or create video input")
+            #endif
             return
         }
 
@@ -82,10 +125,16 @@ class CaptureService {
 
         captureSession = session
 
-        Task.detached { [weak session] in
+        Task.detached { [weak session, weak self] in
+            #if DEBUG
+            print("[CaptureService] Starting AVCaptureSession...")
+            #endif
             session?.startRunning()
             await MainActor.run { [weak self] in
                 self?.isSessionRunning = true
+                #if DEBUG
+                print("[CaptureService] AVCaptureSession started — isSessionRunning = true")
+                #endif
             }
         }
         #endif
@@ -93,6 +142,9 @@ class CaptureService {
 
     func takePhoto(completion: @escaping (Data?) -> Void) {
         #if targetEnvironment(simulator)
+        #if DEBUG
+        print("[CaptureService] takePhoto — simulator path (synthetic image)")
+        #endif
         let renderer = UIGraphicsImageRenderer(size: CGSize(width: 400, height: 300))
         let img = renderer.image { ctx in
             UIColor.systemGray5.setFill()
@@ -113,9 +165,15 @@ class CaptureService {
         completion(data)
         #else
         guard let photoOutput else {
+            #if DEBUG
+            print("[CaptureService] takePhoto — ERROR: photoOutput is nil (session not set up?)")
+            #endif
             completion(nil)
             return
         }
+        #if DEBUG
+        print("[CaptureService] takePhoto — capturing on device")
+        #endif
         let settings = AVCapturePhotoSettings()
         let delegate = PhotoCaptureDelegate { [weak self] data in
             if let data {
@@ -130,6 +188,9 @@ class CaptureService {
 
     func startRecording() {
         #if targetEnvironment(simulator)
+        #if DEBUG
+        print("[CaptureService] startRecording — simulator path")
+        #endif
         isRecording = true
         recordingDuration = 0
         recordingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
@@ -139,7 +200,15 @@ class CaptureService {
             }
         }
         #else
-        guard let movieOutput, !movieOutput.isRecording else { return }
+        guard let movieOutput, !movieOutput.isRecording else {
+            #if DEBUG
+            print("[CaptureService] startRecording — skipped (movieOutput nil or already recording)")
+            #endif
+            return
+        }
+        #if DEBUG
+        print("[CaptureService] startRecording — starting video capture on device")
+        #endif
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).mov")
         let delegate = VideoRecordingDelegate { [weak self] url in
             self?.recordedVideoURL = url
@@ -174,11 +243,15 @@ class CaptureService {
 
     func tearDown() {
         recordingTimer?.invalidate()
+        _previewLayer = nil
         Task.detached { [weak self] in
             await self?.captureSession?.stopRunning()
             await MainActor.run { [weak self] in
                 self?.isSessionRunning = false
                 self?.captureSession = nil
+                #if DEBUG
+                print("[CaptureService] tearDown complete")
+                #endif
             }
         }
     }

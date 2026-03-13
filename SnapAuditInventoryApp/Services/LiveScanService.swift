@@ -120,10 +120,23 @@ final class LiveScanService: NSObject {
 
     func requestPermissions() async -> Bool {
         let status = AVCaptureDevice.authorizationStatus(for: .video)
+        #if DEBUG
+        print("[LiveScanService] Camera permission status: \(status.rawValue)")
+        #endif
         if status == .notDetermined {
-            return await AVCaptureDevice.requestAccess(for: .video)
+            let granted = await AVCaptureDevice.requestAccess(for: .video)
+            #if DEBUG
+            print("[LiveScanService] Camera permission request result: \(granted)")
+            #endif
+            return granted
         }
-        return status == .authorized
+        let authorized = status == .authorized
+        if !authorized {
+            #if DEBUG
+            print("[LiveScanService] Camera permission not authorized (status=\(status.rawValue))")
+            #endif
+        }
+        return authorized
     }
 
     // MARK: - Setup
@@ -136,7 +149,15 @@ final class LiveScanService: NSObject {
         #endif
         return
         #else
-        guard captureSession == nil else { return }
+        guard captureSession == nil else {
+            #if DEBUG
+            print("[LiveScanService] setupSession called but session already exists — skipping")
+            #endif
+            return
+        }
+        #if DEBUG
+        print("[LiveScanService] setupSession — starting camera session setup on device")
+        #endif
         Task { await pipeline.setUIHandler(onFrame) }
 
         let session = AVCaptureSession()
@@ -152,6 +173,9 @@ final class LiveScanService: NSObject {
 
         guard let videoInput = try? AVCaptureDeviceInput(device: camera) else {
             errorMessage = "Camera input unavailable"
+            #if DEBUG
+            print("[LiveScanService] ERROR: Could not create AVCaptureDeviceInput")
+            #endif
             return
         }
 
