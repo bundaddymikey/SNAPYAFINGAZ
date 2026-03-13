@@ -21,13 +21,13 @@ struct LocationFormView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Location Info") {
-                    TextField("Location Name", text: $name)
+                Section("Shelf Info") {
+                    TextField("Shelf Name", text: $name)
                     TextField("Notes (optional)", text: $notes, axis: .vertical)
                         .lineLimit(3...6)
                 }
             }
-            .navigationTitle(isEditing ? "Edit Location" : "New Location")
+            .navigationTitle(isEditing ? "Edit Shelf" : "New Shelf")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

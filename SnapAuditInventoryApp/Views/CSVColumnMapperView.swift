@@ -148,7 +148,7 @@ struct CSVColumnMapperView: View {
         Section {
             columnPicker(title: "Key Column", subtitle: "SKU code or product name", icon: "key.fill", color: .orange, selection: $keyColumn, required: true)
             columnPicker(title: importType.qtyLabel, subtitle: "Numeric quantity", icon: "number.circle.fill", color: importType.accentColor, selection: $qtyColumn, required: true)
-            columnPicker(title: "Location Column", subtitle: "Optional location filter", icon: "mappin.circle.fill", color: .purple, selection: $locationColumn, required: false)
+            columnPicker(title: "Shelf Column", subtitle: "Optional shelf filter", icon: "mappin.circle.fill", color: .purple, selection: $locationColumn, required: false)
             columnPicker(title: "Zone Column", subtitle: "Optional zone/section", icon: "square.grid.2x2.fill", color: .indigo, selection: $zoneColumn, required: false)
         } header: {
             Text("Map Columns")

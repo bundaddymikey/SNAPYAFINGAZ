@@ -35,13 +35,13 @@ struct LocationsListView: View {
         .overlay {
             if viewModel.locations.isEmpty {
                 EmptyStateView(
-                    title: "No Locations",
-                    subtitle: "Tap + to add your first location",
+                    title: "No Shelves",
+                    subtitle: "Tap + to add your first shelf",
                     icon: "mappin.and.ellipse"
                 )
             }
         }
-        .navigationTitle("Locations")
+        .navigationTitle("Shelves")
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -61,7 +61,7 @@ struct LocationsListView: View {
         .sheet(item: $locationToEdit) { location in
             LocationFormView(viewModel: viewModel, location: location)
         }
-        .alert("Delete Location?", isPresented: $showDeleteAlert, presenting: locationToDelete) { location in
+        .alert("Delete Shelf?", isPresented: $showDeleteAlert, presenting: locationToDelete) { location in
             Button("Delete", role: .destructive) { viewModel.deleteLocation(location) }
             Button("Cancel", role: .cancel) { }
         } message: { location in

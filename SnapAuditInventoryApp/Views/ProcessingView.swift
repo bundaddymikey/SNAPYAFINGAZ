@@ -143,7 +143,7 @@ struct ProcessingView: View {
 
     private var sessionInfoCard: some View {
         VStack(spacing: 8) {
-            infoRow(label: "Location", value: session.locationName)
+            infoRow(label: "Shelf", value: session.locationName)
             Divider()
             infoRow(label: "Mode", value: session.mode.displayName)
             Divider()

@@ -194,7 +194,7 @@ final class LiveScanViewModel {
             // Route sub-threshold candidates to review store
             let sessionId = currentSession?.id ?? UUID()
             for fc in result.fallbackCandidates {
-                fallbackStore.evaluateAndRoute(
+                _ = fallbackStore.evaluateAndRoute(
                     candidates: fc.candidates,
                     cropImage: fc.cropImage,
                     timestamp: fc.timestamp,

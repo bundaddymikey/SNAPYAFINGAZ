@@ -524,16 +524,16 @@ struct NewAuditSetupView: View {
                         .font(.title3)
                         .foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("No Locations")
+                        Text("No Shelves")
                             .font(.subheadline.weight(.medium))
-                        Text("Add a location before starting an audit")
+                        Text("Add a shelf before starting an audit")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
                 .padding(.vertical, 4)
             } else {
-                Picker("Location", selection: $selectedLocation) {
+                Picker("Shelf", selection: $selectedLocation) {
                     Text("Select…").tag(nil as Location?)
                     ForEach(locations) { location in
                         Text(location.name).tag(location as Location?)
@@ -541,7 +541,7 @@ struct NewAuditSetupView: View {
                 }
             }
         } header: {
-            Text("Location")
+            Text("Shelf")
         }
     }
 
@@ -779,7 +779,7 @@ struct NewAuditSetupView: View {
                         .font(.body)
                         .foregroundStyle(.secondary)
                         .frame(width: 28)
-                    Text("Select a location first")
+                    Text("Select a shelf first")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -790,9 +790,9 @@ struct NewAuditSetupView: View {
                         .foregroundStyle(.secondary)
                         .frame(width: 28)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("No layouts at this location")
+                        Text("No layouts at this shelf")
                             .font(.subheadline)
-                        Text("Add shelf layouts in the Locations section")
+                        Text("Add shelf layouts in the Shelves section")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

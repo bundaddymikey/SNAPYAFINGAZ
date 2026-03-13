@@ -384,7 +384,7 @@ struct LiveScanResultsView: View {
         List {
             Section {
                 HStack {
-                    Label("Location", systemImage: "mappin")
+                    Label("Shelf", systemImage: "mappin")
                     Spacer()
                     Text(session.locationName)
                         .foregroundStyle(.secondary)

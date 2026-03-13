@@ -3,29 +3,66 @@ import Foundation
 import UIKit
 import CoreImage
 
-// MARK: - Frame Throttle State (nonisolated, videoOutputQueue-only)
+// MARK: - Frame Pipeline Actor
+// A Swift actor serializes all frame-throttle and callback state.
+// captureOutput dispatches to it without touching @MainActor-isolated state.
 
-/// Lightweight state container for frame throttle + processing guard.
-/// Lives off MainActor; all access is on `videoOutputQueue`.
-private final class FrameThrottleState {
+actor FramePipelineActor {
     var lastForwardedTimestamp: CFAbsoluteTime = 0
     var isProcessingFrame = false
-    var minFrameInterval: Double = 1.0 / 4.0  // default 4 fps
-    /// Optional raw pixel buffer callback — stored here so the nonisolated delegate can reach it.
+    var minFrameInterval: Double = 1.0 / 4.0
     var rawPixelBufferHandler: ((CVPixelBuffer, CMTime) -> Void)?
-    /// Legacy UIImage callback for backward compat (called after lazy conversion).
     var uiImageHandler: ((UIImage) -> Void)?
+    /// Shared CIContext — created once inside the actor; accessed only from captureOutput.
+    let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+
+    func setMinFrameInterval(_ interval: Double) {
+        minFrameInterval = interval
+    }
+
+    func setRawHandler(_ handler: ((CVPixelBuffer, CMTime) -> Void)?) {
+        rawPixelBufferHandler = handler
+    }
+
+    func setUIHandler(_ handler: ((UIImage) -> Void)?) {
+        uiImageHandler = handler
+    }
+
+    func reset() {
+        isProcessingFrame = false
+        lastForwardedTimestamp = 0
+        rawPixelBufferHandler = nil
+        uiImageHandler = nil
+    }
+
+    /// Try to acquire the processing slot. Returns nil if throttled or already processing.
+    /// On success, returns a snapshot of the callbacks to use for this frame.
+    func acquireSlot(now: CFAbsoluteTime) -> (rawHandler: ((CVPixelBuffer, CMTime) -> Void)?,
+                                               uiHandler: ((UIImage) -> Void)?,
+                                               ciContext: CIContext,
+                                               resetDelay: Double)? {
+        guard now - lastForwardedTimestamp >= minFrameInterval else { return nil }
+        guard !isProcessingFrame else { return nil }
+        isProcessingFrame = true
+        lastForwardedTimestamp = now
+        return (rawPixelBufferHandler, uiImageHandler, ciContext, max(minFrameInterval, 0.05))
+    }
+
+    func releaseSlot() {
+        isProcessingFrame = false
+    }
 }
 
 // MARK: - LiveScanService
 
 /// Camera service for Real-Time Scan mode.
-/// Provides a stable, persistent preview layer and delivers throttled video frames via callbacks.
+/// UI-observable state is @MainActor-isolated.
+/// Frame delivery uses an actor-isolated FramePipelineActor for thread-safe state.
 @Observable
 @MainActor
 final class LiveScanService: NSObject {
 
-    // MARK: - Observable State
+    // MARK: - Observable State (MainActor)
 
     var isRunning = false
     var latestFrame: UIImage?
@@ -34,9 +71,11 @@ final class LiveScanService: NSObject {
     // MARK: - Configuration
 
     /// Maximum frames per second forwarded to the recognition pipeline.
-    /// Frames arriving faster than this rate are silently dropped.
     var maxProcessingFPS: Double = 4.0 {
-        didSet { throttleState.minFrameInterval = maxProcessingFPS > 0 ? 1.0 / maxProcessingFPS : 0 }
+        didSet {
+            let interval = maxProcessingFPS > 0 ? 1.0 / maxProcessingFPS : 0
+            Task { await pipeline.setMinFrameInterval(interval) }
+        }
     }
 
     // MARK: - Private: Session
@@ -50,7 +89,6 @@ final class LiveScanService: NSObject {
 
     private var _previewLayer: AVCaptureVideoPreviewLayer?
 
-    /// Persistent cached preview layer. Never recreated after first access.
     var previewLayer: AVCaptureVideoPreviewLayer? {
         if let existing = _previewLayer { return existing }
         guard let session = captureSession else { return nil }
@@ -60,37 +98,22 @@ final class LiveScanService: NSObject {
         return layer
     }
 
-    // MARK: - Private: Shared Image Processing Resources
+    // MARK: - Private: Frame Pipeline (actor — not MainActor-isolated)
 
-    /// Allocated once at init. CIContext creation is expensive; never recreate per frame.
-    private let sharedCIContext = CIContext(options: [.useSoftwareRenderer: false])
+    private let pipeline = FramePipelineActor()
 
-    // MARK: - Private: Throttle State (off MainActor)
+    // MARK: - Callbacks
 
-    private let throttleState = FrameThrottleState()
-
-    // MARK: - Private: Callbacks
-
-    /// Primary callback: now stores the UIImage handler in throttleState for preview use.
-    private var frameHandler: ((UIImage) -> Void)? {
-        get { throttleState.uiImageHandler }
-        set { throttleState.uiImageHandler = newValue }
-    }
-
-    /// Primary recognition callback: raw CVPixelBuffer on `videoOutputQueue`.
-    /// The ViewModel hooks here for recognition — no UIImage conversion on this path.
+    /// Raw CVPixelBuffer callback for the recognition path — called on `videoOutputQueue`.
     var rawRecognitionHandler: ((CVPixelBuffer, CMTime) -> Void)? {
-        get { throttleState.rawPixelBufferHandler }
-        set { throttleState.rawPixelBufferHandler = newValue }
+        get { nil } // write-only; getter not meaningful across actor boundary
+        set { Task { await pipeline.setRawHandler(newValue) } }
     }
 
-    /// Legacy UIImage callback — preserved for backward compatibility.
-    /// Receives a lazily-converted UIImage after the raw recognition path fires.
-    /// Set via `setupSession(onFrame:)`; do not set both this and rawRecognitionHandler
-    /// unless you need both paths simultaneously.
+    /// Legacy: same as rawRecognitionHandler for backward compat.
     var rawPixelBufferHandler: ((CVPixelBuffer, CMTime) -> Void)? {
-        get { throttleState.rawPixelBufferHandler }
-        set { throttleState.rawPixelBufferHandler = newValue }
+        get { nil }
+        set { Task { await pipeline.setRawHandler(newValue) } }
     }
 
     // MARK: - Permissions
@@ -105,8 +128,6 @@ final class LiveScanService: NSObject {
 
     // MARK: - Setup
 
-    /// Configure and start the capture session.
-    /// - Parameter onFrame: Called on MainActor with each throttled UIImage frame.
     func setupSession(onFrame: @escaping (UIImage) -> Void) {
         #if targetEnvironment(simulator)
         errorMessage = "Camera not available on simulator"
@@ -116,7 +137,7 @@ final class LiveScanService: NSObject {
         return
         #else
         guard captureSession == nil else { return }
-        self.frameHandler = onFrame
+        Task { await pipeline.setUIHandler(onFrame) }
 
         let session = AVCaptureSession()
         session.sessionPreset = .medium
@@ -138,7 +159,6 @@ final class LiveScanService: NSObject {
             session.addInput(videoInput)
         }
 
-        // Continuous autofocus, auto-exposure, auto white balance
         do {
             try camera.lockForConfiguration()
             if camera.isFocusModeSupported(.continuousAutoFocus) {
@@ -209,15 +229,13 @@ final class LiveScanService: NSObject {
         captureSession = nil
         videoDataOutput = nil
         _previewLayer = nil
-        frameHandler = nil
-        rawPixelBufferHandler = nil
         latestFrame = nil
-        throttleState.isProcessingFrame = false
-        throttleState.lastForwardedTimestamp = 0
+        Task { await pipeline.reset() }
     }
 }
 
 // MARK: - Sample Buffer Delegate
+// captureOutput is nonisolated. It uses the FramePipelineActor via async Task — safely.
 
 extension LiveScanService: AVCaptureVideoDataOutputSampleBufferDelegate {
 
@@ -228,59 +246,33 @@ extension LiveScanService: AVCaptureVideoDataOutputSampleBufferDelegate {
     ) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-
-        // --- Frame throttle ---
         let now = CFAbsoluteTimeGetCurrent()
-        let minInterval = throttleState.minFrameInterval
-        guard now - throttleState.lastForwardedTimestamp >= minInterval else { return }
+        let p = pipeline // local capture of the actor reference — safe across concurrency
 
-        // --- Processing guard ---
-        guard !throttleState.isProcessingFrame else { return }
+        Task {
+            // Acquire the processing slot from the actor — this handles throttle + guard atomically.
+            guard let slot = await p.acquireSlot(now: now) else { return }
 
-        throttleState.isProcessingFrame = true
-        throttleState.lastForwardedTimestamp = now
+            // --- PRIMARY PATH: raw CVPixelBuffer to recognition (no image conversion) ---
+            if let rawHandler = slot.rawHandler {
+                rawHandler(pixelBuffer, pts)
+            }
 
-        // --- PRIMARY PATH: deliver raw CVPixelBuffer directly (no image conversion) ---
-        // This is the preferred recognition path. The ViewModel does detection on the buffer.
-        if let rawHandler = throttleState.rawPixelBufferHandler {
-            #if DEBUG
-            // print("[LiveScanService] Raw frame delivered to recognition")
-            #endif
-            rawHandler(pixelBuffer, pts)
-        }
-
-        // --- PREVIEW PATH: lazy UIImage conversion only when a UI handler or preview update is needed ---
-        let hasUIImageHandler = throttleState.uiImageHandler != nil
-        if hasUIImageHandler {
+            // --- PREVIEW PATH: lazy UIImage conversion ---
             let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-            if let cgImage = sharedCIContext.createCGImage(ciImage, from: ciImage.extent) {
+            if let cgImage = slot.ciContext.createCGImage(ciImage, from: ciImage.extent) {
                 let image = UIImage(cgImage: cgImage)
-                #if DEBUG
-                // print("[LiveScanService] UIImage conversion used (preview handler present)")
-                #endif
+                let uiHandler = slot.uiHandler
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     self.latestFrame = image
-                    self.throttleState.uiImageHandler?(image)
+                    uiHandler?(image)
                 }
             }
-        } else {
-            // No UIImage handler — still update latestFrame for any UI that reads it,
-            // but only if the raw path didn't already handle it.
-            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-            if let cgImage = sharedCIContext.createCGImage(ciImage, from: ciImage.extent) {
-                let image = UIImage(cgImage: cgImage)
-                Task { @MainActor [weak self] in
-                    self?.latestFrame = image
-                }
-            }
-        }
 
-        // Reset processing guard after the throttle interval
-        let resetDelay = max(minInterval, 0.05)
-        videoOutputQueue.asyncAfter(deadline: .now() + resetDelay) { [weak self] in
-            self?.throttleState.isProcessingFrame = false
+            // Reset processing slot after the throttle interval
+            try? await Task.sleep(nanoseconds: UInt64(slot.resetDelay * 1_000_000_000))
+            await p.releaseSlot()
         }
     }
 }
-

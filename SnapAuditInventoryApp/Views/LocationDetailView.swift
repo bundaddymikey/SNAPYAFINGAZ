@@ -48,7 +48,7 @@ struct LocationDetailView: View {
     }
 
     private var locationInfoSection: some View {
-        Section("Location") {
+        Section("Shelf") {
             HStack(spacing: 12) {
                 Image(systemName: "mappin.circle.fill")
                     .font(.title2)

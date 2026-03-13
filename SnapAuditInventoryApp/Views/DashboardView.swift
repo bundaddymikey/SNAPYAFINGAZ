@@ -37,8 +37,8 @@ struct DashboardView: View {
 
                         NavigationLink(value: AppRoute.locations) {
                             DashboardCard(
-                                title: "Locations",
-                                subtitle: "\(locationsVM.locations.count) locations",
+                                title: "Shelves",
+                                subtitle: "\(locationsVM.locations.count) shelves",
                                 icon: "mappin.and.ellipse",
                                 color: .green
                             )
@@ -193,7 +193,7 @@ struct DashboardView: View {
     private var statsRow: some View {
         HStack(spacing: 12) {
             StatPill(label: "Products", value: "\(catalogVM.products.count)", icon: "shippingbox")
-            StatPill(label: "Locations", value: "\(locationsVM.locations.count)", icon: "mappin")
+            StatPill(label: "Shelves", value: "\(locationsVM.locations.count)", icon: "mappin")
             StatPill(label: "Role", value: authViewModel.currentUser?.role.displayName ?? "—", icon: "person")
         }
     }
