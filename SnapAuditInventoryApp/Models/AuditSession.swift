@@ -6,6 +6,10 @@ nonisolated enum CaptureMode: String, Codable, CaseIterable, Sendable {
     case video
     case hybrid
     case realTimeScan
+    /// Multi-photo or short-video mode for trays/bins.
+    /// Cross-frame spatial deduplication prevents counting the same
+    /// physical item more than once across images.
+    case trayCount
 
     var displayName: String {
         switch self {
@@ -13,6 +17,7 @@ nonisolated enum CaptureMode: String, Codable, CaseIterable, Sendable {
         case .video: "Video Sift"
         case .hybrid: "Hybrid"
         case .realTimeScan: "Real-Time Scan"
+        case .trayCount: "Tray Count"
         }
     }
 
@@ -22,6 +27,7 @@ nonisolated enum CaptureMode: String, Codable, CaseIterable, Sendable {
         case .video: "video.fill"
         case .hybrid: "camera.on.rectangle.fill"
         case .realTimeScan: "livephoto.play"
+        case .trayCount: "tray.and.arrow.down.fill"
         }
     }
 
@@ -31,6 +37,7 @@ nonisolated enum CaptureMode: String, Codable, CaseIterable, Sendable {
         case .video: "Record 5–20s video, auto-sample frames"
         case .hybrid: "1 photo + optional short video clip"
         case .realTimeScan: "Live camera feed with continuous recognition"
+        case .trayCount: "Up to 12 photos or short video of a tray — deduped across frames"
         }
     }
 }

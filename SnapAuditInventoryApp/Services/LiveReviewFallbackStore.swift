@@ -26,6 +26,11 @@ final class LiveReviewFallbackStore {
     /// Max detections per SKU per 5-second window before rapidGrowth kicks in.
     private let rapidGrowthLimit = 8
     private let rapidGrowthWindow: TimeInterval = 5.0
+    /// Hard cap: max auto-counted confirmations for any single SKU within a 1-second
+    /// rolling window. Prevents short-burst runaway even when the 5-second budget is unused.
+    /// This complements the tracker's `maxNewCountsPerSecond` at the fallback-store level.
+    private let maxAutoCountsPerSecond: Int = 3
+    private let perSecondWindow: TimeInterval = 1.0
 
     // MARK: - Private Tracking
 
@@ -66,11 +71,22 @@ final class LiveReviewFallbackStore {
             reasonFlags.append(.ambiguousBBox)
         }
 
-        // --- Guardrail 4: Rapid growth check ---
+        // --- Guardrail 4: Rapid growth check (5-second window per SKU) ---
         let now = Date()
         pruneRecentCounts(before: now.addingTimeInterval(-rapidGrowthWindow))
         let recentForSku = recentAutoCounts.filter { $0.skuId == top.skuId }.count
         if recentForSku >= rapidGrowthLimit {
+            reasonFlags.append(.rapidGrowthBlocked)
+        }
+
+        // --- Guardrail 5: Per-second burst cap (1-second window per SKU) ---
+        // Prevents short-burst runaway when many frames arrive within a single second.
+        // This is a tighter inner check that complements the 5-second window above.
+        let perSecondWindowStart = now.addingTimeInterval(-perSecondWindow)
+        let recentPerSecond = recentAutoCounts.filter {
+            $0.skuId == top.skuId && $0.timestamp >= perSecondWindowStart
+        }.count
+        if recentPerSecond >= maxAutoCountsPerSecond {
             reasonFlags.append(.rapidGrowthBlocked)
         }
 

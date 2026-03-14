@@ -56,7 +56,115 @@ nonisolated final class DetectionService: Sendable {
         return await Self.proposeRegions(from: cgImage)
     }
 
-    // MARK: - Core CGImage proposal (shared by both overloads)
+    /// Tray / bin-optimised region proposal.
+    ///
+    /// Uses lower confidence and size thresholds to capture small packed products,
+    /// and a more aggressive cluster-split trigger so dense groups are separated
+    /// before being handed to the classification pipeline.
+    ///
+    /// Differences from `proposeRegions`:
+    /// - `minimumConfidence` 0.28 (vs 0.35) — accepts weaker rectangle detections
+    /// - `minimumSize`       0.018 (vs 0.025) — catches smaller items
+    /// - `maxProposalsPerScale` 28 (vs 20) — more candidates per scale
+    /// - `maxTotalProposals`    60 (vs 40)
+    /// - Cluster split triggers at memberCount≥2 or edgeDensity≥0.12 (vs ≥3/0.16)
+    func proposeRegionsForTray(from image: UIImage) async -> [DetectionRegion] {
+        guard let cgImage = image.cgImage else { return Self.gridRegions(from: image) }
+        return await Self.proposeRegionsForTray(from: cgImage)
+    }
+
+    private static func proposeRegionsForTray(from cgImage: CGImage) async -> [DetectionRegion] {
+        return await Task.detached(priority: .userInitiated) {
+            let imageSize = CGSize(width: cgImage.width, height: cgImage.height)
+            let scales    = Self.effectiveScaleLevels(for: cgImage)
+
+            var combined: [DetectionCandidate] = []
+            for scaleLevel in scales {
+                guard let scaled = Self.resizedImage(cgImage: cgImage, scaleLevel: scaleLevel) else { continue }
+
+                // Lower thresholds: more permissive rectangle detection for tray items
+                var cands = detectRectangles(
+                    cgImage: scaled, scaleLevel: scaleLevel,
+                    maximumObservations: 28, minimumSize: 0.018,
+                    minimumConfidence: 0.28, isClusterSplit: false
+                )
+                cands.append(contentsOf: detectSaliencyRegions(
+                    cgImage: scaled, scaleLevel: scaleLevel, isClusterSplit: false
+                ))
+                combined.append(contentsOf: normalizeCandidates(
+                    cands, imageSize: imageSize, iouThreshold: 0.38, limit: 28
+                ))
+            }
+
+            // More aggressive cluster splitting for tray mode
+            let splitCands = Self.splitDenseClustersForTray(from: combined, originalImage: cgImage)
+            combined.append(contentsOf: splitCands)
+
+            let final = normalizeCandidates(combined, imageSize: imageSize, iouThreshold: 0.42, limit: 60)
+            guard !final.isEmpty else { return Self.gridRegions(from: cgImage) }
+
+            let regions = final.compactMap { c -> DetectionRegion? in
+                guard let crop = Self.crop(cgImage: cgImage, bbox: c.bbox) else { return nil }
+                return DetectionRegion(
+                    bbox: c.bbox,
+                    cropImage: UIImage(cgImage: crop),
+                    isFromRectangle: c.isFromRectangle,
+                    scaleLevel: c.scaleLevel,
+                    isClusterSplit: c.isClusterSplit
+                )
+            }
+            return regions.isEmpty ? Self.gridRegions(from: cgImage) : regions
+        }.value
+    }
+
+    /// Cluster splitting tuned for tray mode — fires on memberCount≥2 or edgeDensity≥0.12,
+    /// compared with the standard ≥3 / 0.16 / 0.18 thresholds.
+    private static func splitDenseClustersForTray(
+        from candidates: [DetectionCandidate],
+        originalImage: CGImage
+    ) -> [DetectionCandidate] {
+        guard candidates.count >= 2 else { return [] }
+
+        let clusters = detectClusters(in: candidates)
+            .sorted { lhs, rhs in
+                lhs.memberCount * 6 + Int(lhs.meanOverlap * 40) >
+                rhs.memberCount * 6 + Int(rhs.meanOverlap * 40)
+            }
+            .prefix(maxClusterCount + 2) // allow more clusters in tray mode
+
+        var split: [DetectionCandidate] = []
+        for cluster in clusters {
+            let expandedCluster = expand(cluster.bbox, by: 0.04)
+            guard let clusterCrop = crop(cgImage: originalImage, bbox: expandedCluster) else { continue }
+
+            let edgeDensity = measureEdgeDensity(in: clusterCrop)
+            // Tray mode: trigger on memberCount≥2 OR edgeDensity≥0.12 (vs ≥3 / 0.16)
+            guard cluster.memberCount >= 2 || cluster.meanOverlap >= 0.12 || edgeDensity >= 0.12 else { continue }
+
+            var nested = detectRectangles(
+                cgImage: clusterCrop, scaleLevel: cluster.scaleLevel,
+                maximumObservations: 16, minimumSize: 0.008,
+                minimumConfidence: 0.20, isClusterSplit: true
+            )
+            if edgeDensity >= 0.14 {
+                nested.append(contentsOf: detectSaliencyRegions(
+                    cgImage: clusterCrop, scaleLevel: cluster.scaleLevel, isClusterSplit: true
+                ))
+            }
+            split.append(contentsOf: nested.map {
+                DetectionCandidate(
+                    bbox: mapToOriginal($0.bbox, within: expandedCluster),
+                    isFromRectangle: $0.isFromRectangle,
+                    scaleLevel: $0.scaleLevel,
+                    isClusterSplit: true,
+                    proposalScore: $0.proposalScore + 0.06
+                )
+            })
+        }
+        return split
+    }
+
+
 
     private static func proposeRegions(from cgImage: CGImage) async -> [DetectionRegion] {
         return await Task.detached(priority: .userInitiated) {

@@ -23,13 +23,19 @@ struct BagAuditScanView: View {
     @State private var showUnknown = false
     @State private var unknownCode = ""
     @State private var flashRowId: UUID? = nil
+    /// Whether the last scanned item was in the expected sheet. Shown in feedback banner.
+    @State private var lastScanWasExpected = true
 
     private struct ScanResult: Identifiable {
         let id = UUID()
         let productName: String
         let newCount: Int
         let matched: Bool
+        var isExpected: Bool = true
     }
+
+    /// SKU IDs from the expected sheet — built once on appear for O(1) lookup during scanning.
+    @State private var expectedSkuIds: Set<UUID> = []
 
     // MARK: - Computed Totals
 
@@ -101,6 +107,19 @@ struct BagAuditScanView: View {
                     handleBarcode(code)
                 }
                 inputRouter = router
+
+                // Build expected SKU ID set for O(1) barcode-scan validation
+                var ids = Set<UUID>()
+                if let snapshot = session.expectedSnapshot {
+                    for row in snapshot.rows where row.matchedSkuId != nil {
+                        ids.insert(row.matchedSkuId!)
+                    }
+                }
+                // Also incorporate line items that were pre-populated with expectedQty
+                for item in session.lineItems where item.skuId != nil && item.expectedQty != nil {
+                    ids.insert(item.skuId!)
+                }
+                expectedSkuIds = ids
             }
             .onDisappear {
                 inputRouter?.deactivate()
@@ -220,15 +239,21 @@ struct BagAuditScanView: View {
     private var scanFeedbackBanner: some View {
         if let result = lastScanResult, result.matched {
             HStack(spacing: 10) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+                Image(systemName: result.isExpected ? "checkmark.circle.fill" : "questionmark.square.dashed")
+                    .foregroundStyle(result.isExpected ? .green : .indigo)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(result.productName)
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
-                    Text("Count → \(result.newCount)")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                    if !result.isExpected {
+                        Text("Not on expected sheet — confirm?")
+                            .font(.caption)
+                            .foregroundStyle(.indigo)
+                    } else {
+                        Text("Count → \(result.newCount)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
             }
@@ -319,7 +344,10 @@ struct BagAuditScanView: View {
             return
         }
 
-        // 2. Record count via unified service
+        // 2. Check if this SKU is on the expected sheet (when a sheet exists)
+        let isExpected = expectedSkuIds.isEmpty || expectedSkuIds.contains(matchedSKU.id)
+
+        // 3. Record count via unified service
         let lineItem = countService.recordCount(
             session: session,
             skuId: matchedSKU.id,
@@ -329,12 +357,20 @@ struct BagAuditScanView: View {
             context: modelContext
         )
 
+        // 4. If not on expected sheet, flag the line item for operator review
+        if !isExpected && !expectedSkuIds.isEmpty {
+            lineItem.flagReasons.appendIfNotContains(.unexpectedItem)
+            lineItem.reviewStatus = .pending
+            try? modelContext.save()
+        }
+
         flashRowId = lineItem.id
         showUnknown = false
         lastScanResult = ScanResult(
             productName: lineItem.skuNameSnapshot,
             newCount: lineItem.visionCount,
-            matched: true
+            matched: true,
+            isExpected: isExpected
         )
         TTSService.shared.speakBarcodeScan(productName: lineItem.skuNameSnapshot)
         Task { @MainActor in

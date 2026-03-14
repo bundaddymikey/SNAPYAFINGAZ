@@ -100,6 +100,7 @@ struct BuiltInPreset {
     let accentColor: Color
 
     // Config
+    let captureMode: CaptureMode
     let recognitionScope: RecognitionScope
     let strictBrandFilter: Bool
     let allowPossibleStragglers: Bool
@@ -117,6 +118,7 @@ struct BuiltInPreset {
             description: "Restrict recognition to one brand. Detects stragglers.",
             icon: "building.2.fill",
             accentColor: .purple,
+            captureMode: .photo,
             recognitionScope: .brandLimited,
             strictBrandFilter: false,
             allowPossibleStragglers: true,
@@ -133,6 +135,7 @@ struct BuiltInPreset {
             description: "Limit recognition to a product category.",
             icon: "tag.fill",
             accentColor: .blue,
+            captureMode: .photo,
             recognitionScope: .categoryLimited,
             strictBrandFilter: true,
             allowPossibleStragglers: false,
@@ -146,9 +149,10 @@ struct BuiltInPreset {
         BuiltInPreset(
             id: "tray_count_high_accuracy",
             name: "Tray Count",
-            description: "High accuracy tray-based count with OCR assist.",
-            icon: "tray.2.fill",
-            accentColor: .mint,
+            description: "Multi-photo/video with cross-frame dedup. Counts each item once.",
+            icon: "tray.and.arrow.down.fill",
+            accentColor: .orange,
+            captureMode: .trayCount,
             recognitionScope: .all,
             strictBrandFilter: true,
             allowPossibleStragglers: false,
@@ -165,6 +169,7 @@ struct BuiltInPreset {
             description: "Identify similar-looking variants. Prioritizes review queue.",
             icon: "square.on.square.badge.person.crop",
             accentColor: .orange,
+            captureMode: .photo,
             recognitionScope: .all,
             strictBrandFilter: false,
             allowPossibleStragglers: false,
@@ -181,6 +186,7 @@ struct BuiltInPreset {
             description: "Full catalog scan. Best for unsorted bins or piles.",
             icon: "shippingbox.fill",
             accentColor: .indigo,
+            captureMode: .photo,
             recognitionScope: .all,
             strictBrandFilter: false,
             allowPossibleStragglers: false,

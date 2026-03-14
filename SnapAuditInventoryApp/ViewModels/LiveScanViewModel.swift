@@ -52,6 +52,8 @@ final class LiveScanViewModel {
     var countService: AuditCountService?
     /// Review fallback store — accumulates uncertain detections for operator review.
     let fallbackStore = LiveReviewFallbackStore()
+    /// Persistent cross-frame object tracker — ensures each physical item is counted only once.
+    let objectTracker = LiveObjectTracker()
     /// Pending raw frame for recognition — CVPixelBuffer avoids UIImage conversion overhead.
     private var pendingPixelBuffer: CVPixelBuffer?
     /// Wall-clock time the pending buffer was received. Used for stale-frame rejection.
@@ -67,6 +69,10 @@ final class LiveScanViewModel {
     private var skuNameMap: [UUID: String] = [:]
     private var modelContext: ModelContext?
 
+    /// Expected sheet context for the current session.
+    /// When non-empty, this narrows recognition candidates and gates suspicious counts.
+    private var expectedSheetCtx: ExpectedSheetContext = .empty
+
     // MARK: - Confidence Threshold
 
     private let countThreshold: Float = 0.55
@@ -75,31 +81,75 @@ final class LiveScanViewModel {
 
     func setup(context: ModelContext) {
         self.modelContext = context
-        loadCatalogData(context: context)
+        loadCatalogData(context: context, session: nil)
     }
 
-    private func loadCatalogData(context: ModelContext) {
+    /// Call this when a session is attached so that the expected sheet context
+    /// can narrow candidateSkuIds and sanity-check counts.
+    func attachSession(_ session: AuditSession, context: ModelContext) {
+        currentSession = session
+        loadCatalogData(context: context, session: session)
+    }
+
+    private func loadCatalogData(context: ModelContext, session: AuditSession?) {
         // Load embeddings (fetch Embedding model, convert to EmbeddingRecord structs)
         let embDescriptor = FetchDescriptor<Embedding>()
         let embeddings = (try? context.fetch(embDescriptor)) ?? []
         embeddingRecords = embeddings.compactMap { emb -> EmbeddingRecord? in
             guard let url = emb.sourceMedia?.fileURL else { return nil }
+            let angle = emb.viewAngle
             return EmbeddingRecord(
                 embeddingId: emb.id,
                 skuId: emb.skuId,
                 vectorData: emb.vectorData,
                 qualityScore: emb.qualityScore,
-                sourceMediaURL: url
+                sourceMediaURL: url,
+                viewAngle: angle,
+                isHighPriority: angle.isHighPriority
             )
         }
 
         // Load active SKUs
         let skuDescriptor = FetchDescriptor<ProductSKU>()
         let allSkus = (try? context.fetch(skuDescriptor)) ?? []
-        candidateSkuIds = allSkus.filter(\.isActive).map(\.id)
+        let allCandidateIds = allSkus.filter(\.isActive).map(\.id)
         skuNameMap = Dictionary(uniqueKeysWithValues: allSkus.map { ($0.id, $0.productName) })
 
-        AuditLogger.shared.logSession("LiveScan: loaded \(candidateSkuIds.count) SKUs, \(embeddingRecords.count) embeddings")
+        // Build expected sheet context if a session is provided.
+        // This context narrows candidateSkuIds to the expected product set when available.
+        if let session {
+            var shelfSnapshots: [ShelfExpectedRowSnapshot] = []
+            var sessionSnapshots: [ExpectedRowSnapshot] = []
+
+            if let layoutId = session.selectedLayoutId {
+                let layoutDescriptor = FetchDescriptor<ShelfLayout>()
+                if let layouts = try? context.fetch(layoutDescriptor),
+                   let layout = layouts.first(where: { $0.id == layoutId }) {
+                    shelfSnapshots = layout.expectedRows.map { ShelfExpectedRowSnapshot(from: $0) }
+                }
+            }
+            if let snapshot = session.expectedSnapshot {
+                sessionSnapshots = snapshot.rows.map { ExpectedRowSnapshot(from: $0) }
+            }
+
+            if !shelfSnapshots.isEmpty || !sessionSnapshots.isEmpty {
+                expectedSheetCtx = ExpectedSheetContext(shelfRows: shelfSnapshots, sessionRows: sessionSnapshots)
+            } else {
+                expectedSheetCtx = .empty
+            }
+        } else {
+            expectedSheetCtx = .empty
+        }
+
+        // Narrow candidateSkuIds to expected products when a sheet is active.
+        // This makes recognition faster and more accurate on known inventory.
+        candidateSkuIds = expectedSheetCtx.effectiveCandidateIds(fullCatalogIds: allCandidateIds)
+
+        AuditLogger.shared.logSession(
+            "LiveScan: loaded \(candidateSkuIds.count) candidate SKUs " +
+            "(\(expectedSheetCtx.isEmpty ? "full catalog" : "expected-sheet narrowed")), " +
+            "\(embeddingRecords.count) embeddings"
+        )
     }
 
     // MARK: - Start / Stop / Pause
@@ -108,6 +158,18 @@ final class LiveScanViewModel {
         guard await scanService.requestPermissions() else {
             scanService.errorMessage = "Camera permission required"
             return
+        }
+
+        // Reset tracker and counts for a clean session start.
+        objectTracker.reset()
+        runningCounts.removeAll()
+        totalItemsDetected = 0
+        framesProcessed = 0
+        fallbackStore.clear()
+
+        // Reload catalog data with the current session so expected-sheet narrowing is applied.
+        if let context = modelContext {
+            loadCatalogData(context: context, session: currentSession)
         }
 
         scanState = .scanning
@@ -147,12 +209,14 @@ final class LiveScanViewModel {
     func finishScanning() {
         scanState = .finished
         scanService.stopRunning()
+        objectTracker.reset()
         AuditLogger.shared.logSession("LiveScan: finished — \(totalItemsDetected) items across \(framesProcessed) frames")
         syncService?.sendStatusChange(status: "Finished", framesProcessed: framesProcessed, totalItems: totalItemsDetected)
     }
 
     func tearDown() {
         scanService.tearDown()
+        objectTracker.reset()
     }
 
     // MARK: - Frame Processing
@@ -277,12 +341,111 @@ final class LiveScanViewModel {
         }.value
     }
 
-    /// Accumulate running counts from detections, routing uncertain items to the fallback store.
+    /// Accumulate running counts from detections using the persistent object tracker.
+    ///
+    /// Flow:
+    /// 1. All raw detections are passed through `objectTracker.processFrame(_:)` which
+    ///    matches them to existing tracks, advances their confirmation state, and returns:
+    ///    - `newlyCounted`: detections to count (1 per physical object, ever).
+    ///    - `rateBlocked`: detections blocked by the per-second cap → routed to review.
+    /// 2. Rate-blocked detections go directly to the fallback store for operator review.
+    /// 3. Each newly-confirmed detection is sanity-checked against the expected sheet:
+    ///    - Unexpected items (not on the sheet) are routed to review.
+    ///    - Suspicious overcounts (count >> expected qty) are routed to review.
+    /// 4. Detections that pass all gates increment `runningCounts` and persist.
     private func updateRunningCounts(from detections: [LiveDetection]) {
         let sessionId = currentSession?.id ?? UUID()
 
-        for detection in detections {
-            // Evaluate guardrails — close-match detection happens here on main actor
+        // --- Primary gate: object tracker (returns newlyCounted + rateBlocked) ---
+        let trackerResult = objectTracker.processFrame(detections)
+
+        // Route rate-blocked detections to review — they were confirmed by the tracker
+        // but exceeded the per-second burst cap. An operator can accept/reject them.
+        for blocked in trackerResult.rateBlocked {
+            let candidates = [
+                LiveProductCandidate(
+                    skuId: blocked.skuId,
+                    skuName: blocked.skuName,
+                    confidence: blocked.confidence
+                )
+            ]
+            _ = fallbackStore.evaluateAndRoute(
+                candidates: candidates,
+                cropImage: nil,
+                timestamp: blocked.timestamp,
+                auditSessionId: sessionId
+            )
+            AuditLogger.shared.logRecognition(
+                skuName: blocked.skuName,
+                score: Double(blocked.confidence),
+                status: "rate-blocked-to-review (per-sec cap)"
+            )
+        }
+
+        let newlyConfirmed = trackerResult.newlyCounted
+
+        for detection in newlyConfirmed {
+            // --- Expected sheet sanity check ---
+            if !expectedSheetCtx.isEmpty {
+                let currentCount = runningCounts[detection.skuName, default: 0]
+                let proposedCount = currentCount + 1
+                let sanity = expectedSheetCtx.sanityCheck(
+                    skuId: detection.skuId,
+                    productName: detection.skuName,
+                    proposedCount: proposedCount
+                )
+
+                switch sanity {
+                case .ok:
+                    break // Pass through — proceed to count gate
+
+                case .unexpectedItem:
+                    // Item is not on the expected sheet — route to review
+                    let candidates = [
+                        LiveProductCandidate(
+                            skuId: detection.skuId,
+                            skuName: detection.skuName,
+                            confidence: detection.confidence
+                        )
+                    ]
+                    _ = fallbackStore.evaluateAndRoute(
+                        candidates: candidates,
+                        cropImage: nil,
+                        timestamp: detection.timestamp,
+                        auditSessionId: sessionId
+                    )
+                    AuditLogger.shared.logRecognition(
+                        skuName: detection.skuName,
+                        score: Double(detection.confidence),
+                        status: "live-unexpected-item (not on expected sheet)"
+                    )
+                    continue  // Skip normal count path
+
+                case .suspiciousOvercount(let expectedQty, let actualCount, let multiplier):
+                    // Count is unrealistically high — route to review
+                    let candidates = [
+                        LiveProductCandidate(
+                            skuId: detection.skuId,
+                            skuName: detection.skuName,
+                            confidence: detection.confidence
+                        )
+                    ]
+                    _ = fallbackStore.evaluateAndRoute(
+                        candidates: candidates,
+                        cropImage: nil,
+                        timestamp: detection.timestamp,
+                        auditSessionId: sessionId
+                    )
+                    AuditLogger.shared.logRecognition(
+                        skuName: detection.skuName,
+                        score: Double(detection.confidence),
+                        status: "live-suspicious-overcount (expected=\(expectedQty), actual=\(actualCount), \(String(format: "%.1f", multiplier))×)"
+                    )
+                    continue  // Skip normal count path
+                }
+            }
+
+            // --- Secondary gate: confidence + close-match guardrail ---
             let candidates = [
                 LiveProductCandidate(
                     skuId: detection.skuId,
@@ -293,7 +456,7 @@ final class LiveScanViewModel {
 
             let shouldCount = fallbackStore.evaluateAndRoute(
                 candidates: candidates,
-                cropImage: nil, // crop images come from recognizeFrame for sub-threshold paths
+                cropImage: nil,
                 timestamp: detection.timestamp,
                 auditSessionId: sessionId
             )
@@ -320,7 +483,7 @@ final class LiveScanViewModel {
                     confidence: Double(detection.confidence),
                     sourceType: .liveCamera,
                     context: context,
-                    skipBroadcast: true // ScanEvent broadcast happens below for multi-device
+                    skipBroadcast: true
                 )
             }
 
@@ -332,7 +495,6 @@ final class LiveScanViewModel {
 
             guard let syncService, syncService.isScannerConnected else { continue }
 
-            // Stage 1: emit a structured ScanEvent when in a shared session
             if syncService.isInSharedSession, let session = currentSession {
                 let event = ScanEvent(
                     sessionId: session.id,
@@ -345,7 +507,6 @@ final class LiveScanViewModel {
                 )
                 syncService.sendScanEvent(event)
             } else {
-                // Phase 0 fallback when not using session code join
                 let payload = ScanResultPayload(
                     skuId: detection.skuId,
                     skuName: detection.skuName,

@@ -25,6 +25,8 @@ struct TrainingMediaView: View {
     @State private var selectedVideoItem: PhotosPickerItem?
     @State private var mediaToDelete: ReferenceMedia?
     @State private var showCameraPicker = false
+    /// The view angle the user has selected before capturing / uploading
+    @State private var pendingAngle: ReferenceViewAngle = .general
 
     private let columns = [
         GridItem(.flexible(), spacing: 8),
@@ -35,6 +37,8 @@ struct TrainingMediaView: View {
     var body: some View {
         Section {
             healthBadge
+            coverageGrid
+            anglePickerRow
 
             if !trainingVM.referenceMedia.isEmpty {
                 mediaGrid
@@ -54,7 +58,9 @@ struct TrainingMediaView: View {
         } header: {
             Text("Training Media")
         } footer: {
-            Text(trainingVM.trainingHealth.description)
+            Text(trainingVM.trainingHealth.description +
+                 " · \(trainingVM.referenceMedia.count) files · " +
+                 "\(trainingVM.coveredAnglesCount) / \(ReferenceViewAngle.allCases.count) angles covered")
                 .font(.caption)
         }
         .onAppear {
@@ -62,6 +68,7 @@ struct TrainingMediaView: View {
         }
         .onChange(of: selectedPhotoItems) { _, items in
             guard !items.isEmpty else { return }
+            let angle = pendingAngle
             Task {
                 var dataItems: [Data] = []
                 for item in items {
@@ -71,16 +78,17 @@ struct TrainingMediaView: View {
                 }
                 selectedPhotoItems = []
                 if !dataItems.isEmpty {
-                    await trainingVM.addPhotos(dataItems: dataItems)
+                    await trainingVM.addPhotos(dataItems: dataItems, viewAngle: angle)
                 }
             }
         }
         .onChange(of: selectedVideoItem) { _, item in
             guard let item else { return }
+            let angle = pendingAngle
             Task {
                 if let video = try? await item.loadTransferable(type: VideoTransferable.self) {
                     selectedVideoItem = nil
-                    await trainingVM.addVideoFrames(videoURL: video.url)
+                    await trainingVM.addVideoFrames(videoURL: video.url, viewAngle: angle)
                 } else {
                     selectedVideoItem = nil
                 }
@@ -104,14 +112,17 @@ struct TrainingMediaView: View {
             CameraCapturePicker { image in
                 showCameraPicker = false
                 guard let data = image.jpegData(compressionQuality: 0.85) else { return }
+                let angle = pendingAngle
                 Task {
-                    await trainingVM.addPhotos(dataItems: [data])
+                    await trainingVM.addPhotos(dataItems: [data], viewAngle: angle)
                 }
             } onCancel: {
                 showCameraPicker = false
             }
         }
     }
+
+    // MARK: - Health badge
 
     private var healthBadge: some View {
         HStack(spacing: 10) {
@@ -141,6 +152,71 @@ struct TrainingMediaView: View {
         }
     }
 
+    // MARK: - View angle coverage grid (11 angles × dot)
+
+    private var coverageGrid: some View {
+        let coverage = trainingVM.angleCoverage()
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Angle Coverage")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 90), spacing: 6)],
+                spacing: 6
+            ) {
+                ForEach(ReferenceViewAngle.allCases, id: \.self) { angle in
+                    let covered = coverage[angle] ?? false
+                    HStack(spacing: 4) {
+                        Image(systemName: angle.icon)
+                            .font(.caption2)
+                            .foregroundStyle(covered ? .green : .secondary)
+                        Text(angle.displayName)
+                            .font(.caption2.weight(covered ? .semibold : .regular))
+                            .foregroundStyle(covered ? .primary : .secondary)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        covered
+                            ? Color.green.opacity(0.10)
+                            : Color(.secondarySystemFill),
+                        in: RoundedRectangle(cornerRadius: 7)
+                    )
+                    .overlay {
+                        if pendingAngle == angle {
+                            RoundedRectangle(cornerRadius: 7)
+                                .strokeBorder(Color.accentColor, lineWidth: 1.5)
+                        }
+                    }
+                    .onTapGesture { pendingAngle = angle }
+                }
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    // MARK: - Angle picker strip (compact horizontal chips)
+
+    private var anglePickerRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "target")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+                Text("Capturing as: \(pendingAngle.displayName)")
+                    .font(.caption.weight(.medium))
+                Spacer()
+                Text("Tap grid above to change")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    // MARK: - Media grid
+
     private var mediaGrid: some View {
         LazyVGrid(columns: columns, spacing: 8) {
             ForEach(trainingVM.referenceMedia, id: \.id) { media in
@@ -152,6 +228,8 @@ struct TrainingMediaView: View {
         }
         .padding(.vertical, 4)
     }
+
+    // MARK: - Processing row
 
     private var processingRow: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -170,12 +248,14 @@ struct TrainingMediaView: View {
         .padding(.vertical, 4)
     }
 
+    // MARK: - Add buttons (limit raised to 50)
+
     private var addButtons: some View {
         VStack(spacing: 8) {
             HStack(spacing: 12) {
                 PhotosPicker(
                     selection: $selectedPhotoItems,
-                    maxSelectionCount: 20,
+                    maxSelectionCount: 50,
                     matching: .images
                 ) {
                     Label("Library", systemImage: "photo.badge.plus")
@@ -212,7 +292,7 @@ struct TrainingMediaView: View {
             }
             .buttonStyle(.plain)
 
-            Text("Capture front, back, side, label & barcode angles for best training results.")
+            Text("Select angle in grid above, then capture. Multiple angles improve recognition accuracy.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
@@ -295,6 +375,19 @@ struct ReferenceMediaThumbnail: View {
                         .padding(4)
                 }
             }
+            .overlay(alignment: .topTrailing) {
+                // View angle badge
+                if media.viewAngle != .general {
+                    Text(media.viewAngle.displayName)
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4))
+                        .padding(4)
+                        .lineLimit(1)
+                }
+            }
     }
 
     private var qualityDot: some View {
@@ -306,3 +399,4 @@ struct ReferenceMediaThumbnail: View {
             .overlay { Circle().strokeBorder(.white, lineWidth: 1) }
     }
 }
+

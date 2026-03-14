@@ -36,6 +36,10 @@ nonisolated enum FlagReason: String, Codable, CaseIterable, Sendable {
     case largeVariance = "LARGE_VARIANCE"
     case lookAlikeGroup = "LOOK_ALIKE_GROUP"
     case outsideSelectedBrand = "OUTSIDE_SELECTED_BRAND"
+    /// Detected product is not listed on the expected sheet at all.
+    case unexpectedItem = "UNEXPECTED_ITEM"
+    /// Count exceeds expected quantity by a suspicious amount — possible duplicate scan.
+    case suspiciousOvercount = "SUSPICIOUS_OVERCOUNT"
 
     var label: String {
         switch self {
@@ -51,6 +55,8 @@ nonisolated enum FlagReason: String, Codable, CaseIterable, Sendable {
         case .largeVariance: "Large Variance"
         case .lookAlikeGroup: "Look-Alike"
         case .outsideSelectedBrand: "Possible Straggler"
+        case .unexpectedItem: "Not on Sheet"
+        case .suspiciousOvercount: "Suspicious Count"
         }
     }
 
@@ -68,6 +74,8 @@ nonisolated enum FlagReason: String, Codable, CaseIterable, Sendable {
         case .largeVariance: "chart.line.uptrend.xyaxis"
         case .lookAlikeGroup: "square.on.square.dashed"
         case .outsideSelectedBrand: "building.2.slash.fill"
+        case .unexpectedItem: "questionmark.square.dashed"
+        case .suspiciousOvercount: "exclamationmark.2"
         }
     }
 
@@ -85,13 +93,15 @@ nonisolated enum FlagReason: String, Codable, CaseIterable, Sendable {
         case .largeVariance: .purple
         case .lookAlikeGroup: .cyan
         case .outsideSelectedBrand: .teal
+        case .unexpectedItem: .indigo
+        case .suspiciousOvercount: .orange
         }
     }
 
     var isMismatch: Bool {
         switch self {
-        case .expectedZeroButFound, .shortage, .overage, .largeVariance: true
-        case .lookAlikeGroup, .outsideSelectedBrand: false
+        case .expectedZeroButFound, .shortage, .overage, .largeVariance,
+             .unexpectedItem, .suspiciousOvercount: true
         default: false
         }
     }

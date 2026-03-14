@@ -15,6 +15,8 @@ nonisolated struct EmbeddingRecord: Sendable {
     let vectorData: Data
     let qualityScore: Double
     let sourceMediaURL: String
+    let viewAngle: ReferenceViewAngle
+    let isHighPriority: Bool
 }
 
 nonisolated struct FocusHotspot: Identifiable, Codable, Sendable, Equatable {
@@ -167,10 +169,26 @@ nonisolated final class OnDeviceEngine: RecognitionEngine, Sendable {
         )
     }
 
+    // MARK: - Core classification with top-K weighted pooling
+    //
+    // Rather than taking a single best-matching embedding per SKU, this function:
+    //   1. Computes cosine similarity against every qualifying embedding.
+    //   2. Groups by SKU, keeping up to the top-K matches (default 5).
+    //   3. Computes a weighted-average score using each embedding's
+    //      angle.recognitionWeight × qualityScore as the weight.
+    //   4. Applies a small diversity bonus (+2%) if the top-K set covers
+    //      at least 3 distinct angles — rewarding wide training coverage.
+    //
+    // This means:
+    //   • Every additional high-quality training image contributes to the score.
+    //   • Products with coverage across front, label, barcode, etc. score higher.
+    //   • A single great match is still respected, but many good matches beat it.
+
     private func classify(
         queryVector: Data,
         candidateSkuIds: [UUID],
-        embeddings: [EmbeddingRecord]
+        embeddings: [EmbeddingRecord],
+        topK: Int = 5
     ) -> [RecognitionCandidate] {
         let candidateSet = Set(candidateSkuIds)
         let relevant = embeddings.filter {
@@ -178,34 +196,64 @@ nonisolated final class OnDeviceEngine: RecognitionEngine, Sendable {
         }
         guard !relevant.isEmpty else { return [] }
 
-        var bestPerSku: [UUID: (score: Float, url: String, embeddingId: UUID)] = [:]
-
+        // Step 1: Score every embedding
+        struct ScoredRecord {
+            let record: EmbeddingRecord
+            let similarity: Float
+            var weightedScore: Float {
+                Float(record.viewAngle.recognitionWeight * record.qualityScore) * similarity
+            }
+        }
+        var scoredBySkuId: [UUID: [ScoredRecord]] = [:]
         for record in relevant {
             let sim = EmbeddingService.shared.cosineSimilarity(
                 vectorA: queryVector,
                 vectorB: record.vectorData
             )
-            if let current = bestPerSku[record.skuId] {
-                if sim > current.score {
-                    bestPerSku[record.skuId] = (sim, record.sourceMediaURL, record.embeddingId)
-                }
-            } else {
-                bestPerSku[record.skuId] = (sim, record.sourceMediaURL, record.embeddingId)
-            }
+            let sr = ScoredRecord(record: record, similarity: sim)
+            scoredBySkuId[record.skuId, default: []].append(sr)
         }
 
-        var candidates = bestPerSku.map { skuId, value in
-            RecognitionCandidate(
-                id: value.embeddingId,
-                skuId: skuId,
-                score: value.score,
-                nearestReferenceURL: value.url
+        // Step 2: Per-SKU top-K weighted average
+        var candidates: [RecognitionCandidate] = []
+        var bestRef: [UUID: String] = [:]
+
+        for (skuId, scored) in scoredBySkuId {
+            // Sort by weighted score descending, then pick top-K
+            let topKRecords = scored
+                .sorted { $0.weightedScore > $1.weightedScore }
+                .prefix(topK)
+
+            guard !topKRecords.isEmpty else { continue }
+
+            // Weighted average: Σ(weightedScore) / Σ(weight)
+            let totalWeight = topKRecords.reduce(0.0) { $0 + Float($1.record.viewAngle.recognitionWeight * $1.record.qualityScore) }
+            let weightedSum = topKRecords.reduce(0.0) { $0 + $1.weightedScore }
+            var pooledScore: Float = totalWeight > 0 ? weightedSum / totalWeight : topKRecords[0].similarity
+
+            // Diversity bonus: if top-K contains ≥3 distinct angles, +2%
+            let distinctAngles = Set(topKRecords.map { $0.record.viewAngle })
+            if distinctAngles.count >= 3 {
+                pooledScore = min(1.0, pooledScore * 1.02)
+            }
+
+            let best = topKRecords.first!
+            bestRef[skuId] = best.record.sourceMediaURL
+            candidates.append(
+                RecognitionCandidate(
+                    id: best.record.embeddingId,
+                    skuId: skuId,
+                    score: pooledScore,
+                    nearestReferenceURL: best.record.sourceMediaURL
+                )
             )
         }
+
         candidates.sort { $0.score > $1.score }
         let top3 = Array(candidates.prefix(3))
 
         guard let maxScore = top3.first?.score, maxScore > 0 else { return top3 }
+        // Normalize relative to the best candidate so scores are comparable
         return top3.map {
             RecognitionCandidate(
                 id: $0.id,

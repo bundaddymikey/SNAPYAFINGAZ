@@ -17,12 +17,15 @@ struct RecognitionTestView: View {
     private var embeddingRecords: [EmbeddingRecord] {
         allEmbeddings.compactMap { emb -> EmbeddingRecord? in
             guard let mediaURL = emb.sourceMedia?.fileURL else { return nil }
+            let angle = emb.viewAngle
             return EmbeddingRecord(
                 embeddingId: emb.id,
                 skuId: emb.skuId,
                 vectorData: emb.vectorData,
                 qualityScore: emb.qualityScore,
-                sourceMediaURL: mediaURL
+                sourceMediaURL: mediaURL,
+                viewAngle: angle,
+                isHighPriority: angle.isHighPriority
             )
         }
     }

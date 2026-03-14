@@ -114,9 +114,13 @@ final class AuditCountService {
     }
 
     /// Recompute mismatch flags (shortage, overage, largeVariance, expectedZeroButFound).
-    /// Preserves non-mismatch flags (lowLight, blur, closeMatch, etc.).
+    /// Preserves non-mismatch flags (lowLight, blur, closeMatch, etc.) and pipeline-set flags
+    /// (.unexpectedItem, .suspiciousOvercount) that require operator review to resolve.
     func recomputeMismatchFlags(_ item: AuditLineItem) {
-        var flags = item.flagReasons.filter { !$0.isMismatch }
+        // Preserve: quality flags (non-mismatch) + pipeline-flagged unexpected/suspicious items
+        // Those require operator action to dismiss — not cleared simply by a count change.
+        let flagsToPreserve: Set<FlagReason> = [.unexpectedItem, .suspiciousOvercount]
+        var flags = item.flagReasons.filter { !$0.isMismatch || flagsToPreserve.contains($0) }
 
         if let expected = item.expectedQty {
             if expected == 0 && item.visionCount > 0 {

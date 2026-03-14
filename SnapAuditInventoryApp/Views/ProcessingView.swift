@@ -12,7 +12,7 @@ struct ProcessingView: View {
         ("Sampling frames", 0.20),
         ("Multi-scale detection", 0.45),
         ("Hotspot analysis", 0.70),
-        ("Deduping & counting", 0.85),
+        ("Cross-frame dedup & count", 0.85),
         ("Summarizing results", 1.00)
     ]
 

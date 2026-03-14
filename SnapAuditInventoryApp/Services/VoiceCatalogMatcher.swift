@@ -1,13 +1,12 @@
 import Foundation
 
-// MARK: - Match Result
-
-/// A candidate product match produced by VoiceCatalogMatcher.
+/// Matched voice result is additionally annotated with whether it was on the expected sheet.
 struct VoiceMatchResult: Identifiable, Equatable, Sendable {
     let id: UUID
     let sku: ProductSKUSnapshot
     let score: Double        // 0.0 – 1.0 (higher = better)
     let matchedField: String // Which field drove the match (for debug)
+    var isExpected: Bool = true  // false when product is not on the expected sheet
 
     var isHighConfidence: Bool { score >= 0.72 }
 }
@@ -47,6 +46,10 @@ struct ProductSKUSnapshot: Identifiable, Equatable, Sendable {
 ///  - Tag / ocrKeyword hit                 → bonus +0.12 each
 ///  - Word-level partial token score (Jaccard over words) → fallback
 ///  - Results trimmed to top 3, confidence threshold 0.35
+///
+///  When `expectedSkuIds` is non-empty (expected sheet is loaded):
+///  - Expected products receive a +0.08 additive score boost
+///  - Non-expected products receive a -0.12 penalty (but floor at 0)
 enum VoiceCatalogMatcher {
 
     static let highConfidenceThreshold = 0.72
@@ -54,7 +57,17 @@ enum VoiceCatalogMatcher {
 
     /// Score all active SKUs against the spoken query.
     /// Returns up to 3 candidates sorted by score descending.
-    static func match(query: String, against snapshots: [ProductSKUSnapshot]) -> [VoiceMatchResult] {
+    ///
+    /// - Parameters:
+    ///   - query: Spoken phrase, lowercased.
+    ///   - snapshots: All active product SKU snapshots.
+    ///   - expectedSkuIds: Optional set of SKU IDs from the expected sheet.
+    ///     When non-empty, expected products are boosted and unexpected ones penalized.
+    static func match(
+        query: String,
+        against snapshots: [ProductSKUSnapshot],
+        expectedSkuIds: Set<UUID> = []
+    ) -> [VoiceMatchResult] {
         let q = query.normalized
         guard !q.isEmpty else { return [] }
 
@@ -63,13 +76,27 @@ enum VoiceCatalogMatcher {
         var results: [VoiceMatchResult] = []
 
         for snapshot in snapshots {
-            let (score, field) = scoreSnapshot(snapshot, query: q, queryTokens: qTokens)
+            let (rawScore, field) = scoreSnapshot(snapshot, query: q, queryTokens: qTokens)
+
+            // Apply expected-sheet adjustment
+            var score = rawScore
+            var isExpected = true
+            if !expectedSkuIds.isEmpty {
+                if expectedSkuIds.contains(snapshot.id) {
+                    score = min(1.0, score + 0.08)  // boost expected products
+                } else {
+                    score = max(0, score - 0.12)    // penalize unexpected products
+                    isExpected = false
+                }
+            }
+
             if score >= minimumThreshold {
                 results.append(VoiceMatchResult(
                     id: UUID(),
                     sku: snapshot,
                     score: score,
-                    matchedField: field
+                    matchedField: field,
+                    isExpected: isExpected
                 ))
             }
         }

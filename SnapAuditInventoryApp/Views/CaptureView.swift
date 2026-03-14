@@ -54,7 +54,13 @@ struct CaptureView: View {
     @Query private var allSKUs: [ProductSKU]
     @Query private var allGroups: [LookAlikeGroup]
 
-    private var maxPhotos: Int { session.mode == .hybrid ? 1 : 8 }
+    private var maxPhotos: Int {
+        switch session.mode {
+        case .hybrid: return 1
+        case .trayCount: return 12
+        default: return 8
+        }
+    }
     private var canTakeMore: Bool { captureService.capturedPhotos.count < maxPhotos }
     private var minVideoSeconds: Double { 5 }
     private var maxVideoSeconds: Double { 20 }
@@ -707,6 +713,8 @@ struct CaptureView: View {
                 hybridControls
             case .realTimeScan:
                 EmptyView() // Handled by LiveScanView
+            case .trayCount:
+                trayCountControls
             }
         }
         .padding(.horizontal, 24)
@@ -1012,6 +1020,64 @@ struct CaptureView: View {
                     .foregroundStyle(.green)
 
                 shutterButton(isVideo: false, disabled: true) { }
+            }
+        }
+    }
+
+    private var trayCountControls: some View {
+        VStack(spacing: 12) {
+            // Guidance banner
+            HStack(spacing: 8) {
+                Image(systemName: "tray.and.arrow.down.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+                Text("Tray Count — capture \(captureService.capturedPhotos.count)/\(maxPhotos) angles")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.white)
+                Spacer()
+                if captureService.capturedPhotos.count >= 2 {
+                    Label("Ready", systemImage: "checkmark.circle.fill")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.green)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.orange.opacity(0.18), in: RoundedRectangle(cornerRadius: 10))
+
+            if captureService.capturedPhotos.count < maxPhotos {
+                Text("Shoot from multiple angles — duplicates are removed automatically")
+                    .font(.caption2)
+                    .foregroundStyle(.gray)
+                    .multilineTextAlignment(.center)
+            } else {
+                Text("Maximum photos reached — tap Done to process")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+            }
+
+            HStack(spacing: 32) {
+                // Optional short video for denser trays
+                shutterButton(isVideo: true, disabled: captureService.capturedPhotos.isEmpty) {
+                    if captureService.isRecording {
+                        if captureService.recordingDuration >= minVideoSeconds {
+                            captureService.stopRecording()
+                        }
+                    } else {
+                        captureService.startRecording()
+                    }
+                }
+                .onChange(of: captureService.recordingDuration) { _, newValue in
+                    if newValue >= maxVideoSeconds && captureService.isRecording {
+                        captureService.stopRecording()
+                    }
+                }
+
+                // Primary: multi-photo burst
+                shutterButton(isVideo: false, disabled: !canTakeMore) {
+                    captureService.takePhoto { _ in }
+                }
             }
         }
     }

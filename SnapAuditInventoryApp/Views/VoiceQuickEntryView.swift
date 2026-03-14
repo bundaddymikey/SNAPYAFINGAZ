@@ -31,6 +31,8 @@ final class VoiceEntryViewModel {
 
     let voiceService = VoiceEntryService()
     private var catalog: [ProductSKUSnapshot] = []
+    /// SKU IDs from the expected sheet. When non-empty, boosts expected products and flags unexpected ones.
+    private var expectedSkuIds: Set<UUID> = []
 
     // Callback: called when a sku should have its quantity incremented
     var onCountIncremented: ((ProductSKUSnapshot, Int) -> Void)?
@@ -38,11 +40,36 @@ final class VoiceEntryViewModel {
     // MARK: - Load Catalog
 
     func loadCatalog(from context: ModelContext) {
+        loadCatalog(from: context, session: nil)
+    }
+
+    /// Load catalog data, optionally constrained by the expected sheet of a given session.
+    func loadCatalog(from context: ModelContext, session: AuditSession?) {
         let descriptor = FetchDescriptor<ProductSKU>(
             predicate: #Predicate { $0.isActive == true }
         )
         let skus = (try? context.fetch(descriptor)) ?? []
         catalog = skus.map { ProductSKUSnapshot(from: $0) }
+
+        // Build the expected SKU set from both shelf rows and session-level uploaded CSV
+        var expectedIds = Set<UUID>()
+        if let session {
+            if let layoutId = session.selectedLayoutId {
+                let layoutDescriptor = FetchDescriptor<ShelfLayout>()
+                if let layouts = try? context.fetch(layoutDescriptor),
+                   let layout = layouts.first(where: { $0.id == layoutId }) {
+                    for row in layout.expectedRows where row.matchedSkuId != nil {
+                        expectedIds.insert(row.matchedSkuId!)
+                    }
+                }
+            }
+            if let snapshot = session.expectedSnapshot {
+                for row in snapshot.rows where row.matchedSkuId != nil {
+                    expectedIds.insert(row.matchedSkuId!)
+                }
+            }
+        }
+        expectedSkuIds = expectedIds
     }
 
     // MARK: - Voice Flow
@@ -107,7 +134,11 @@ final class VoiceEntryViewModel {
 
     private func runMatch(query: String) async {
         matchState = .processing
-        let results = VoiceCatalogMatcher.match(query: query, against: catalog)
+        let results = VoiceCatalogMatcher.match(
+            query: query,
+            against: catalog,
+            expectedSkuIds: expectedSkuIds
+        )
 
         if results.isEmpty {
             matchState = .noMatch(query)
@@ -402,6 +433,14 @@ struct VoiceQuickEntrySheet: View {
                             Text(result.matchedField)
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
+                            if !result.isExpected {
+                                Text("Not on sheet")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 2)
+                                    .background(.indigo, in: Capsule())
+                            }
                         }
                     }
                     .padding(14)

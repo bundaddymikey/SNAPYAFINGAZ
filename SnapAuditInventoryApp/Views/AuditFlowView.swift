@@ -30,6 +30,7 @@ struct AuditFlowView: View {
                         if session.mode == .realTimeScan {
                             step = .liveScan(session)
                         } else {
+                            // photo, video, hybrid, and trayCount all use the capture → processing → results flow
                             step = .capture(session)
                         }
                     }

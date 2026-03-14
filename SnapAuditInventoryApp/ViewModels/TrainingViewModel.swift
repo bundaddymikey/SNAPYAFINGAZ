@@ -26,9 +26,9 @@ nonisolated enum TrainingHealth: Sendable {
 
     var description: String {
         switch self {
-        case .weak: "Add at least 5 photos for reliable recognition"
-        case .ok: "Recognition is functional. More photos improve accuracy."
-        case .strong: "Excellent training coverage"
+        case .weak: "Add at least 5 photos covering multiple angles for reliable recognition"
+        case .ok: "Recognition is functional. More angles improve accuracy."
+        case .strong: "Excellent training coverage across multiple views"
         }
     }
 }
@@ -71,12 +71,32 @@ class TrainingViewModel {
         let good = goodEmbeddingCount
         let allEmb = referenceMedia.flatMap(\.embeddings)
         let avgQuality = allEmb.isEmpty ? 0.0 : allEmb.map(\.qualityScore).reduce(0, +) / Double(allEmb.count)
-        if good >= 8 && avgQuality >= 0.55 { return .strong }
+        if good >= 8 && avgQuality >= 0.55 && coveredAnglesCount >= 4 { return .strong }
         if good >= 3 { return .ok }
         return .weak
     }
 
-    func addPhotos(dataItems: [Data]) async {
+    /// Number of distinct high-priority angles with at least 1 qualifying embedding
+    var coveredAnglesCount: Int { angleCoverage().filter { $0.value }.count }
+
+    /// Returns a dictionary of angle → covered (true = has ≥1 embedding at that angle with quality ≥0.35)
+    func angleCoverage() -> [ReferenceViewAngle: Bool] {
+        let allEmb = referenceMedia.flatMap(\.embeddings).filter { $0.qualityScore >= 0.35 }
+        let coveredAngles = Set(allEmb.map { $0.viewAngle })
+        return Dictionary(
+            uniqueKeysWithValues: ReferenceViewAngle.allCases.map { angle in
+                (angle, coveredAngles.contains(angle))
+            }
+        )
+    }
+
+    // MARK: - Add Photos
+
+    /// Adds one or more photos at a specific view angle.
+    /// - Parameters:
+    ///   - dataItems: JPEG/PNG data for each photo
+    ///   - viewAngle: The perspective captured (front, back, label close-up, etc.)
+    func addPhotos(dataItems: [Data], viewAngle: ReferenceViewAngle = .general) async {
         guard let modelContext, let sku = currentSKU else { return }
         isProcessing = true
         processingProgress = 0
@@ -87,7 +107,7 @@ class TrainingViewModel {
             guard let image = UIImage(data: data) else { continue }
             do {
                 let path = try ReferenceStorageService.shared.savePhoto(data, skuId: sku.id)
-                let media = ReferenceMedia(sku: sku, type: .photo, fileURL: path)
+                let media = ReferenceMedia(sku: sku, type: .photo, fileURL: path, viewAngle: viewAngle)
                 modelContext.insert(media)
                 try? modelContext.save()
 
@@ -97,7 +117,8 @@ class TrainingViewModel {
                     sourceMedia: media,
                     vectorData: vector,
                     qualityScore: quality.qualityScore,
-                    tagsJSON: quality.tagsJSON
+                    tagsJSON: quality.tagsJSON,
+                    viewAngle: viewAngle
                 )
                 modelContext.insert(embedding)
                 try? modelContext.save()
@@ -112,7 +133,9 @@ class TrainingViewModel {
         fetchMedia()
     }
 
-    func addVideoFrames(videoURL: URL) async {
+    // MARK: - Add Video (sampled at label-close angle by default)
+
+    func addVideoFrames(videoURL: URL, viewAngle: ReferenceViewAngle = .general) async {
         guard let modelContext, let sku = currentSKU else { return }
         isProcessing = true
         processingProgress = 0
@@ -121,7 +144,7 @@ class TrainingViewModel {
 
         do {
             let path = try ReferenceStorageService.shared.saveVideoFromTemp(videoURL, skuId: sku.id)
-            let media = ReferenceMedia(sku: sku, type: .video, fileURL: path)
+            let media = ReferenceMedia(sku: sku, type: .video, fileURL: path, viewAngle: viewAngle)
             modelContext.insert(media)
             try? modelContext.save()
 
@@ -140,7 +163,8 @@ class TrainingViewModel {
                         sourceMedia: media,
                         vectorData: vector,
                         qualityScore: quality.qualityScore,
-                        tagsJSON: quality.tagsJSON
+                        tagsJSON: quality.tagsJSON,
+                        viewAngle: viewAngle
                     )
                     modelContext.insert(embedding)
                 } catch { }

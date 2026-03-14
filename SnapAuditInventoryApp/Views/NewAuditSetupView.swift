@@ -471,6 +471,7 @@ struct NewAuditSetupView: View {
             selectedBuiltInPresetId = preset.id
             selectedCustomPreset = nil
         }
+        selectedMode = preset.captureMode
         captureQualityMode = preset.captureQualityMode
         recognitionScope = preset.recognitionScope
         strictBrandFilter = preset.strictBrandFilter

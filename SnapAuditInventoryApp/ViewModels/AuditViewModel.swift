@@ -368,7 +368,21 @@ class AuditViewModel {
         let embeddingRecords = fetchEmbeddingRecords(modelContext: modelContext)
         let (skuIds, expectedQtyMap, onHandQtyMap) = fetchCandidateInfo(for: session, modelContext: modelContext)
         let skuNameMap = fetchSkuNames(modelContext: modelContext)
-        let priorFactors = buildPriorFactors(expectedQtyMap: expectedQtyMap, skuIds: skuIds)
+
+        // Build the expected sheet context — drives candidate restriction, prior factors,
+        // and unexpected-item flagging throughout the entire processing pipeline.
+        let expectedSheetCtx = buildExpectedSheetContext(for: session, modelContext: modelContext)
+        let priorFactors = buildPriorFactors(
+            expectedQtyMap: expectedQtyMap,
+            skuIds: skuIds,
+            expectedSheetCtx: expectedSheetCtx
+        )
+        AuditLogger.shared.logSession(
+            "ExpectedSheet: \(expectedSheetCtx.candidateSkuIds.count) expected SKUs " +
+            "(\'\(expectedSheetCtx.isEmpty ? "no sheet" : "active")\'); " +
+            "priorFactors: \(priorFactors.count)"
+        )
+
         let lookAlikeInfo = fetchLookAlikeInfo(modelContext: modelContext)
         let skuKeywordsMap = fetchSkuKeywords(modelContext: modelContext)
         let layoutZoneInfo = fetchLayoutZoneInfo(for: session, lookAlikeInfo: lookAlikeInfo, modelContext: modelContext)
@@ -399,12 +413,32 @@ class AuditViewModel {
 
         processingStatus = "Proposing regions…"
 
+        // Pre-compute total expected count for the pile analyzer
+        let totalExpected: Int? = expectedQtyMap.values.reduce(0, +) > 0
+            ? expectedQtyMap.values.reduce(0, +) : nil
+        let isTrayMode = session.mode == .trayCount
+
         for (i, source) in imageSources.enumerated() {
             let base = 0.25 + Double(i) / Double(totalImages) * 0.45
             processingProgress = base
             processingStatus = "Multi-scale scan… (\(i + 1)/\(totalImages))"
 
-            let regions = await DetectionService.shared.proposeRegions(from: source.image)
+            // ── Tray mode: pile-aware region proposal ────────────────────────────
+            // 1. proposeRegionsForTray uses lower thresholds for packed items.
+            // 2. PileClusterAnalyzer adds grid/edge-guided sub-regions for dense clusters.
+            let rawRegions: [DetectionRegion]
+            if isTrayMode, let cgImage = source.image.cgImage {
+                let trayRegions = await DetectionService.shared.proposeRegionsForTray(from: source.image)
+                rawRegions = await PileClusterAnalyzer.shared.augmentRegions(
+                    trayRegions, in: cgImage, expectedItemCount: totalExpected
+                )
+                AuditLogger.shared.logSession(
+                    "Pile analyzer: \(trayRegions.count) standard → \(rawRegions.count) augmented regions (source \(i + 1))"
+                )
+            } else {
+                rawRegions = await DetectionService.shared.proposeRegions(from: source.image)
+            }
+            let regions = rawRegions
 
             for region in regions {
                 let matchedZone = layoutZoneInfo.findZone(for: region.bbox)
@@ -735,33 +769,86 @@ class AuditViewModel {
         }
 
         processingProgress = 0.70
-        processingStatus = "Deduplicating multi-scale results…"
 
-        // Phase 5: Deduplication
-        let surviving = deduplicate(detections: allDetections)
+        // Phase 5: Deduplication — strategy depends on mode
+        if session.mode == .trayCount {
+            // ── Tray Count: cross-frame spatial deduplication ──────────────────────
+            // Convert raw detections to TrayDetection, tagged with sourceIndex so the
+            // deduplicator can prevent the same physical item being counted twice in
+            // the same image.
+            processingStatus = "Cross-frame deduplication…"
+            let sourceIdToIndex: [UUID: Int] = Dictionary(
+                uniqueKeysWithValues: imageSources.enumerated().map { ($1.id, $0) }
+            )
 
-        processingProgress = 0.80
-        processingStatus = "Saving evidence…"
-
-        // Phase 6: Save evidence crops
-        var savedDetections: [RawDetection] = []
-        for var det in surviving {
-            if det.bbox.width > 0,
-               let jpeg = cropFromSource(sourceId: det.sourceId, bbox: det.bbox, imageSources: imageSources),
-               let data = jpeg.jpegData(compressionQuality: 0.75),
-               let path = try? MediaStorageService.shared.saveCrop(
-                   data, sessionId: session.id, filename: "crop_\(UUID().uuidString).jpg"
-               ) {
-                det.cropPath = path
+            let trayDetections: [TrayDetection] = allDetections.map { raw in
+                TrayDetection(
+                    sourceIndex: sourceIdToIndex[raw.sourceId] ?? 0,
+                    skuId: raw.chosenSkuId,
+                    skuName: raw.chosenSkuName,
+                    bbox: raw.bbox,
+                    confidence: raw.finalScore,
+                    isSoftAssigned: raw.isSoftAssigned,
+                    flagReasons: raw.flagReasons,
+                    reviewStatus: raw.reviewStatus,
+                    cropPath: raw.cropPath,
+                    queryEmbeddingData: raw.queryEmbeddingData,
+                    top3: raw.top3,
+                    metadataJSON: raw.metadataJSON
+                )
             }
-            savedDetections.append(det)
+
+            let (confirmedClusters, reviewItems) = TrayCountDeduplicator.deduplicate(
+                trayDetections,
+                expectedQtyMap: expectedQtyMap
+            )
+
+            AuditLogger.shared.logSession(
+                "TrayCount dedup: \(allDetections.count) detections → " +
+                "\(confirmedClusters.count) clusters + \(reviewItems.count) low-confidence"
+            )
+
+            processingProgress = 0.80
+            processingStatus = "Saving evidence…"
+
+            // Phase 6T: Save crops for clusters + build line items
+            buildTrayCountLineItems(
+                for: session,
+                clusters: confirmedClusters,
+                reviewItems: reviewItems,
+                imageSources: imageSources,
+                expectedSheetCtx: expectedSheetCtx,
+                modelContext: modelContext
+            )
+
+        } else {
+            // ── Standard path: per-image IoU deduplication ────────────────────────
+            processingStatus = "Deduplicating multi-scale results…"
+            let surviving = deduplicate(detections: allDetections)
+
+            processingProgress = 0.80
+            processingStatus = "Saving evidence…"
+
+            // Phase 6: Save evidence crops
+            var savedDetections: [RawDetection] = []
+            for var det in surviving {
+                if det.bbox.width > 0,
+                   let jpeg = cropFromSource(sourceId: det.sourceId, bbox: det.bbox, imageSources: imageSources),
+                   let data = jpeg.jpegData(compressionQuality: 0.75),
+                   let path = try? MediaStorageService.shared.saveCrop(
+                    data, sessionId: session.id, filename: "crop_\(UUID().uuidString).jpg"
+                   ) {
+                    det.cropPath = path
+                }
+                savedDetections.append(det)
+            }
+
+            processingProgress = 0.88
+            processingStatus = "Summarizing results…"
+
+            // Phase 7: Build line items — pass the expected sheet context for unexpected-item flagging
+            buildLineItems(for: session, detections: savedDetections, expectedSheetCtx: expectedSheetCtx, modelContext: modelContext)
         }
-
-        processingProgress = 0.88
-        processingStatus = "Summarizing results…"
-
-        // Phase 7: Build line items
-        buildLineItems(for: session, detections: savedDetections, modelContext: modelContext)
 
         // Phase 8: Reconcile with expected/on-hand
         processingStatus = "Reconciling…"
@@ -1146,15 +1233,19 @@ class AuditViewModel {
         let embeddings = (try? modelContext.fetch(descriptor)) ?? []
         return embeddings.compactMap { emb -> EmbeddingRecord? in
             guard let url = emb.sourceMedia?.fileURL else { return nil }
+            let angle = emb.viewAngle
             return EmbeddingRecord(
                 embeddingId: emb.id,
                 skuId: emb.skuId,
                 vectorData: emb.vectorData,
                 qualityScore: emb.qualityScore,
-                sourceMediaURL: url
+                sourceMediaURL: url,
+                viewAngle: angle,
+                isHighPriority: angle.isHighPriority
             )
         }
     }
+
 
     private func fetchCandidateInfo(for session: AuditSession, modelContext: ModelContext) -> (skuIds: [UUID], expectedQtyMap: [UUID: Int], onHandQtyMap: [UUID: Int]) {
         var expectedQtyMap: [UUID: Int] = [:]
@@ -1176,6 +1267,20 @@ class AuditViewModel {
             }
         }
 
+        // Also incorporate shelf-attached expected rows so that recognized expected quantities
+        // are available for saturation and reconciliation even without a per-session CSV.
+        if let layoutId = session.selectedLayoutId, expectedQtyMap.isEmpty {
+            let descriptor = FetchDescriptor<ShelfLayout>()
+            if let layouts = try? modelContext.fetch(descriptor),
+               let layout = layouts.first(where: { $0.id == layoutId }) {
+                for row in layout.expectedRows {
+                    if let skuId = row.matchedSkuId, expectedQtyMap[skuId] == nil {
+                        expectedQtyMap[skuId] = row.expectedQty
+                    }
+                }
+            }
+        }
+
         let guidedSkuIds = Array(expectedQtyMap.keys)
         if !guidedSkuIds.isEmpty {
             return (guidedSkuIds, expectedQtyMap, onHandQtyMap)
@@ -1191,7 +1296,39 @@ class AuditViewModel {
         return (candidateIds, expectedQtyMap, onHandQtyMap)
     }
 
-    private func buildPriorFactors(expectedQtyMap: [UUID: Int], skuIds: [UUID]) -> [UUID: Double] {
+    /// Build an `ExpectedSheetContext` for a session by merging:
+    /// 1. ShelfExpectedRow records from the selected layout (layout-attached CSV)
+    /// 2. ExpectedRow records from the session's ExpectedSnapshot (per-session CSV upload)
+    private func buildExpectedSheetContext(for session: AuditSession, modelContext: ModelContext) -> ExpectedSheetContext {
+        var shelfSnapshots: [ShelfExpectedRowSnapshot] = []
+        var sessionSnapshots: [ExpectedRowSnapshot] = []
+
+        if let layoutId = session.selectedLayoutId {
+            let descriptor = FetchDescriptor<ShelfLayout>()
+            if let layouts = try? modelContext.fetch(descriptor),
+               let layout = layouts.first(where: { $0.id == layoutId }) {
+                shelfSnapshots = layout.expectedRows.map { ShelfExpectedRowSnapshot(from: $0) }
+            }
+        }
+
+        if let snapshot = session.expectedSnapshot {
+            sessionSnapshots = snapshot.rows.map { ExpectedRowSnapshot(from: $0) }
+        }
+
+        guard !shelfSnapshots.isEmpty || !sessionSnapshots.isEmpty else { return .empty }
+        return ExpectedSheetContext(shelfRows: shelfSnapshots, sessionRows: sessionSnapshots)
+    }
+
+    private func buildPriorFactors(
+        expectedQtyMap: [UUID: Int],
+        skuIds: [UUID],
+        expectedSheetCtx: ExpectedSheetContext = .empty
+    ) -> [UUID: Double] {
+        // If an expected sheet context is available, use its richer prior computation.
+        if !expectedSheetCtx.isEmpty {
+            return expectedSheetCtx.priorFactors(for: skuIds)
+        }
+        // Legacy path: minimal 1.1/0.85 boost from raw qty map.
         guard !expectedQtyMap.isEmpty else { return [:] }
         var factors: [UUID: Double] = [:]
         for skuId in skuIds {
@@ -1355,7 +1492,12 @@ class AuditViewModel {
         return UIImage(cgImage: cropped)
     }
 
-    private func buildLineItems(for session: AuditSession, detections: [RawDetection], modelContext: ModelContext) {
+    private func buildLineItems(
+        for session: AuditSession,
+        detections: [RawDetection],
+        expectedSheetCtx: ExpectedSheetContext = .empty,
+        modelContext: ModelContext
+    ) {
         let autoAccept = UserDefaults.standard.double(forKey: "autoAcceptConfidence").nonZeroOrDefault(0.85)
 
         var grouped: [String: [RawDetection]] = [:]
@@ -1377,11 +1519,49 @@ class AuditViewModel {
             let confidence = max(0, min(1, mean * (1 - pendingPenalty) - closeMatchPenalty - partialPenalty))
 
             let hasPending = group.contains { $0.reviewStatus == .pending }
-            let itemReviewStatus: ReviewStatus = (confidence >= autoAccept && !hasPending) ? .confirmed : .pending
+            var itemReviewStatus: ReviewStatus = (confidence >= autoAccept && !hasPending) ? .confirmed : .pending
 
             var allFlags: [FlagReason] = []
             for det in group {
                 for r in det.flagReasons where !allFlags.contains(r) { allFlags.append(r) }
+            }
+
+            // --- Expected sheet intelligence ---
+            // 1. Flag items not on the expected sheet as .unexpectedItem → routes to review.
+            // 2. Flag items whose count suspiciously exceeds expected → .suspiciousOvercount → review.
+            if !expectedSheetCtx.isEmpty, let skuId = first.chosenSkuId {
+                let proposedCount = group.count
+                let sanity = expectedSheetCtx.sanityCheck(
+                    skuId: skuId,
+                    productName: first.chosenSkuName,
+                    proposedCount: proposedCount
+                )
+                switch sanity {
+                case .ok:
+                    break // Normal — no additional flag needed
+
+                case .unexpectedItem:
+                    allFlags.appendIfNotContains(.unexpectedItem)
+                    // Unexpected items always need operator confirmation
+                    itemReviewStatus = .pending
+                    AuditLogger.shared.logRecognition(
+                        skuName: first.chosenSkuName,
+                        score: mean,
+                        status: "unexpected-item (not on expected sheet)"
+                    )
+
+                case .suspiciousOvercount(let expectedQty, let actualCount, let multiplier):
+                    allFlags.appendIfNotContains(.suspiciousOvercount)
+                    // Also flag as overage if not already
+                    if expectedQty > 0 { allFlags.appendIfNotContains(.overage) }
+                    // Force review for suspicious counts
+                    itemReviewStatus = .pending
+                    AuditLogger.shared.logRecognition(
+                        skuName: first.chosenSkuName,
+                        score: mean,
+                        status: "suspicious-overcount (expected=\(expectedQty), actual=\(actualCount), \(String(format: "%.1f", multiplier))×)"
+                    )
+                }
             }
 
             let lineItem = AuditLineItem(
@@ -1438,6 +1618,153 @@ class AuditViewModel {
             try? modelContext.save()
         }
     }
+
+    // MARK: - Tray Count Line Item Builder
+
+    /// Converts `TrayItemCluster` results from cross-frame deduplication into
+    /// `AuditLineItem` records — one cluster = one physical object = count of 1.
+    ///
+    /// Groups are then accumulated by SKU so the line item count equals the number
+    /// of distinct physical objects found (not detection count).
+    ///
+    /// Low-confidence review items are grouped by SKU into separate pending line items
+    /// so operators see a concise list rather than hundreds of individual crops.
+    private func buildTrayCountLineItems(
+        for session: AuditSession,
+        clusters: [TrayItemCluster],
+        reviewItems: [TrayDetection],
+        imageSources: [(id: UUID, image: UIImage)],
+        expectedSheetCtx: ExpectedSheetContext,
+        modelContext: ModelContext
+    ) {
+        let autoAccept = UserDefaults.standard.double(forKey: "autoAcceptConfidence").nonZeroOrDefault(0.85)
+
+        // Group confirmed clusters by SKU (nil = unknown)
+        var clustersBySkuId: [String: [TrayItemCluster]] = [:]
+        for cluster in clusters {
+            let key = cluster.skuId?.uuidString ?? "unknown"
+            clustersBySkuId[key, default: []].append(cluster)
+        }
+
+        // Build one AuditLineItem per SKU — visionCount = number of confirmed clusters
+        for (_, skuClusters) in clustersBySkuId {
+            guard let first = skuClusters.first else { continue }
+
+            let count = skuClusters.count
+            let meanConf = skuClusters.reduce(0.0) { $0 + $1.confidence } / Double(max(count, 1))
+
+            var allFlags = first.allFlagReasons
+            let hasPending = skuClusters.contains { $0.reviewStatus == .pending }
+            var itemStatus: ReviewStatus = (meanConf >= autoAccept && !hasPending) ? .confirmed : .pending
+
+            // Apply expected-sheet sanity check for tray items too
+            if !expectedSheetCtx.isEmpty, let skuId = first.skuId {
+                let sanity = expectedSheetCtx.sanityCheck(skuId: skuId, productName: first.skuName, proposedCount: count)
+                switch sanity {
+                case .ok: break
+                case .unexpectedItem:
+                    allFlags.appendIfNotContains(.unexpectedItem)
+                    itemStatus = .pending
+                    AuditLogger.shared.logRecognition(skuName: first.skuName, score: meanConf, status: "tray-unexpected-item")
+                case .suspiciousOvercount(let eq, let ac, let mult):
+                    allFlags.appendIfNotContains(.suspiciousOvercount)
+                    if eq > 0 { allFlags.appendIfNotContains(.overage) }
+                    itemStatus = .pending
+                    AuditLogger.shared.logRecognition(skuName: first.skuName, score: meanConf,
+                        status: "tray-suspicious-overcount (expected=\(eq), actual=\(ac), \(String(format: "%.1f", mult))×)")
+                }
+            }
+
+            let lineItem = AuditLineItem(
+                session: session,
+                skuId: first.skuId,
+                skuNameSnapshot: first.skuName,
+                visionCount: count,
+                countConfidence: meanConf,
+                inferredFromPrior: false,
+                isSoftAssigned: skuClusters.contains { $0.isSoftAssigned },
+                reviewStatus: itemStatus
+            )
+            lineItem.flagReasons = allFlags
+            modelContext.insert(lineItem)
+
+            // Attach evidence for every cluster member (best crop from representative)
+            for cluster in skuClusters {
+                let rep = cluster.representative
+                let cropPath = rep.cropPath
+
+                let evidence = DetectionEvidence(
+                    sessionId: session.id,
+                    cropURL: cropPath,
+                    frameSourceId: session.id,
+                    bbox: rep.bbox,
+                    top3Candidates: rep.top3,
+                    chosenSkuId: rep.skuId,
+                    chosenSkuName: rep.skuName,
+                    finalScore: rep.confidence,
+                    reasons: rep.flagReasons,
+                    reviewStatus: rep.reviewStatus,
+                    isSoftAssigned: rep.isSoftAssigned
+                )
+                evidence.lineItem = lineItem
+                modelContext.insert(evidence)
+            }
+        }
+
+        // ── Grouped pile review ──────────────────────────────────────────────────
+        // Instead of one pending line item per SKU, spatially cluster the review
+        // items into pile zones ("Pile A", "Pile B", …).
+        // Each pile zone becomes ONE pending line item so the operator reviews
+        // a consolidated cluster rather than individual uncertain detections.
+        let pileGroups = TrayCountDeduplicator.groupReviewItemsIntoPileClusters(reviewItems)
+
+        for pileGroup in pileGroups {
+            guard let rep = pileGroup.bestRepresentative else { continue }
+
+            // Pile-level flags
+            var reviewFlags = pileGroup.allFlagReasons
+            reviewFlags.appendIfNotContains(.partial)   // mark as partially resolved cluster
+
+            let reviewLineItem = AuditLineItem(
+                session: session,
+                skuId: pileGroup.majoritySkuId,
+                skuNameSnapshot: "\(pileGroup.label): \(pileGroup.majoritySkuName)",
+                visionCount: pileGroup.estimatedCount,
+                countConfidence: pileGroup.averageConfidence,
+                inferredFromPrior: false,
+                isSoftAssigned: true,
+                reviewStatus: .pending
+            )
+            reviewLineItem.flagReasons = reviewFlags
+            modelContext.insert(reviewLineItem)
+
+            // Attach one evidence per pile member (crops kept for operator reference)
+            for trayDet in pileGroup.members {
+                let evidence = DetectionEvidence(
+                    sessionId: session.id,
+                    cropURL: trayDet.cropPath,
+                    frameSourceId: session.id,
+                    bbox: trayDet.bbox,
+                    top3Candidates: trayDet.top3,
+                    chosenSkuId: trayDet.skuId,
+                    chosenSkuName: trayDet.skuName,
+                    finalScore: trayDet.confidence,
+                    reasons: trayDet.flagReasons,
+                    reviewStatus: .pending,
+                    isSoftAssigned: true
+                )
+                evidence.lineItem = reviewLineItem
+                modelContext.insert(evidence)
+            }
+
+            AuditLogger.shared.logSession(
+                "Pile review: '\(pileGroup.label)' — \(pileGroup.members.count) uncertain detections → estimated \(pileGroup.estimatedCount) items"
+            )
+        }
+
+        try? modelContext.save()
+    }
+
 
     private func reconcileLineItems(
         for session: AuditSession,

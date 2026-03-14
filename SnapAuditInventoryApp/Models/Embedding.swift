@@ -10,13 +10,21 @@ class Embedding {
     var createdAt: Date
     var qualityScore: Double
     var tagsJSON: String
+    /// The view angle of the source image. Stored as raw string for SwiftData compatibility.
+    var viewAngleRaw: String
+
+    var viewAngle: ReferenceViewAngle {
+        get { ReferenceViewAngle(rawValue: viewAngleRaw) ?? .general }
+        set { viewAngleRaw = newValue.rawValue }
+    }
 
     init(
         skuId: UUID,
         sourceMedia: ReferenceMedia,
         vectorData: Data,
         qualityScore: Double,
-        tagsJSON: String = "{}"
+        tagsJSON: String = "{}",
+        viewAngle: ReferenceViewAngle = .general
     ) {
         self.id = UUID()
         self.skuId = skuId
@@ -25,5 +33,7 @@ class Embedding {
         self.createdAt = Date()
         self.qualityScore = qualityScore
         self.tagsJSON = tagsJSON
+        self.viewAngleRaw = viewAngle.rawValue
     }
 }
+
